@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="he">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Admin</title>
+  <style>
+    body{font-family:system-ui,Arial;max-width:800px;margin:24px auto;padding:0 12px}
+    input,button{padding:10px;font-size:16px}
+    input{width:100%;box-sizing:border-box;margin:6px 0 12px}
+    pre{background:#111;color:#eee;padding:12px;border-radius:12px;overflow:auto}
+  </style>
+</head>
+<body>
+  <h1>הוספת ערוץ (כפתור אחד)</h1>
+  <label>Admin Token</label>
+  <input id="token" placeholder="ADMIN_TOKEN" />
+  <label>Channel ID</label>
+  <input id="channel_id" placeholder="UC..." />
+  <button onclick="add()">הוסף ערוץ</button>
+  <pre id="out">מוכן.</pre>
+
+<script>
+  const out = (x)=>document.getElementById('out').textContent =
+    typeof x==='string'?x:JSON.stringify(x,null,2);
+
+  async function add(){
+    const token=document.getElementById('token').value.trim();
+    const channel_id=document.getElementById('channel_id').value.trim();
+    if(!channel_id) return out("חסר channel_id");
+    const res=await fetch('/admin/add-channel',{
+      method:'POST',
+      headers:{'content-type':'application/json','x-admin-token':token},
+      body:JSON.stringify({channel_id})
+    });
+    const text=await res.text();
+    try{ out({status:res.status, data:JSON.parse(text)}); }
+    catch{ out({status:res.status, data:text}); }
+  }
+</script>
+</body>
+</html>
