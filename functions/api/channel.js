@@ -18,7 +18,7 @@ export async function onRequest({ env, request }) {
   `).bind(ch.id).first();
 
   const playlists = await env.DB.prepare(`
-    SELECT playlist_id, title, published_at, item_count
+    SELECT playlist_id, title, thumbnail_url, published_at, item_count
     FROM playlists
     WHERE channel_int=?
     ORDER BY (published_at IS NULL), published_at DESC, id DESC
