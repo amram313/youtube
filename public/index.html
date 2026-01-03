@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="he">
+<html lang="he" dir="rtl">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -13,32 +13,22 @@
       <span>YouTube Catalog</span>
     </a>
 
-    <form class="search" id="searchForm">
+    <form class="search" id="searchForm" role="search">
       <input id="searchInput" placeholder="חיפוש בכותרות…" autocomplete="off" />
       <button type="submit">חפש</button>
     </form>
 
-    <nav class="toplinks">
-      <a href="/admin.html">ניהול</a>
-      <a href="/api/health" target="_blank" rel="noreferrer">health</a>
+    <nav class="nav">
+      <a class="navLink" href="/" data-link>בית</a>
+      <a class="navLink" href="/channels" data-link>ערוצים</a>
+      <a class="navLink" href="/playlists" data-link>פלייליסטים</a>
+      <a class="navLink" href="/admin.html">ניהול</a>
     </nav>
   </header>
 
-  <div class="layout">
-    <aside class="sidebar">
-      <div class="sideHead">
-        <div class="sideTitle">ערוצים</div>
-        <button class="miniBtn" id="refreshBtn" title="רענן">↻</button>
-      </div>
-      <div class="sideList" id="channelsList">
-        <div class="muted pad">טוען…</div>
-      </div>
-    </aside>
-
-    <main class="main">
-      <div id="page"></div>
-    </main>
-  </div>
+  <main class="shell">
+    <div id="page" class="page"></div>
+  </main>
 
   <script src="/app.js" defer></script>
 </body>
