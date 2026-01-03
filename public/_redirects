@@ -1,0 +1,4 @@
+/api/* /api/:splat 200
+/admin/* /admin/:splat 200
+/websub/* /websub/:splat 200
+/* /index.html 200
