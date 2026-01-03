@@ -18,20 +18,26 @@
     .list{display:flex;flex-direction:column;gap:8px;max-height:70vh;overflow:auto}
     .ch{display:flex;gap:10px;align-items:center;border:1px solid #eee;border-radius:12px;padding:10px}
     .ch:hover{background:#fafafa}
-    .thumb{width:44px;height:44px;border-radius:10px;background:#eee;object-fit:cover}
+    .thumb{width:44px;height:44px;border-radius:10px;background:#eee;object-fit:cover;flex:0 0 auto}
     .title{font-weight:600}
     .videos{display:flex;flex-direction:column;gap:10px}
     .video{border:1px solid #eee;border-radius:12px;padding:10px}
+    .videoRow{display:flex;gap:10px;align-items:flex-start}
+    .vthumb{width:160px;height:90px;border-radius:12px;background:#eee;object-fit:cover;flex:0 0 auto}
+    @media (max-width: 520px){ .vthumb{width:120px;height:68px} }
     .video .meta{margin-top:6px}
     .pill{display:inline-block;padding:2px 8px;border:1px solid #ddd;border-radius:999px;font-size:12px;color:#444}
     .hr{height:1px;background:#eee;margin:10px 0}
 
-    /* playlists */
     details.playlists{border:1px solid #eee;border-radius:12px;padding:10px}
     details.playlists summary{cursor:pointer;font-weight:600}
     .pl-list{display:flex;flex-direction:column;gap:8px;margin-top:10px;max-height:260px;overflow:auto}
     .pl-item{border:1px solid #f0f0f0;border-radius:10px;padding:10px}
+    .plRow{display:flex;gap:10px;align-items:flex-start}
+    .plthumb{width:160px;height:90px;border-radius:12px;background:#eee;object-fit:cover;flex:0 0 auto}
+    @media (max-width: 520px){ .plthumb{width:120px;height:68px} }
     .pl-meta{margin-top:6px}
+    .small{font-size:12px}
   </style>
 </head>
 <body>
@@ -88,6 +94,76 @@
     return JSON.parse(t);
   }
 
+  // --- client-side cache for oEmbed (NO DB) ---
+  const oembedMem = new Map();
+  function oeKey(url){ return "oe:" + url; }
+
+  async function oembed(url){
+    const key = oeKey(url);
+    if (oembedMem.has(key)) return oembedMem.get(key);
+
+    // try localStorage
+    try {
+      const s = localStorage.getItem(key);
+      if (s) {
+        const j = JSON.parse(s);
+        oembedMem.set(key, j);
+        return j;
+      }
+    } catch {}
+
+    // fetch
+    const p = fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`, {
+      method: "GET",
+      mode: "cors"
+    }).then(async r=>{
+      if(!r.ok) return null;
+      return await r.json();
+    }).catch(()=>null);
+
+    // temporarily store promise to dedupe concurrent calls
+    oembedMem.set(key, p);
+    const data = await p;
+
+    if (data) {
+      const slim = { title: data.title || null, thumbnail_url: data.thumbnail_url || null };
+      oembedMem.set(key, slim);
+      try { localStorage.setItem(key, JSON.stringify(slim)); } catch {}
+      return slim;
+    } else {
+      oembedMem.delete(key);
+      return null;
+    }
+  }
+
+  // limit concurrent fetches (to be nice + fast)
+  async function mapLimit(items, limit, fn){
+    const out = [];
+    let i = 0;
+    const workers = new Array(Math.min(limit, items.length)).fill(0).map(async ()=>{
+      while(i < items.length){
+        const idx = i++;
+        out[idx] = await fn(items[idx]);
+      }
+    });
+    await Promise.all(workers);
+    return out;
+  }
+
+  function videoThumbUrl(videoId){
+    // אין קריאות API, עובד מהר מאוד
+    return `https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/hqdefault.jpg`;
+  }
+
+  function youtubePlaylistEmbedUrl(playlistId){
+    // עובד עם oEmbed
+    return `https://www.youtube.com/embed/videoseries?list=${encodeURIComponent(playlistId)}`;
+  }
+
+  function youtubePlaylistPageUrl(playlistId){
+    return `https://www.youtube.com/playlist?list=${encodeURIComponent(playlistId)}`;
+  }
+
   async function refresh(){
     $('status').textContent = 'טוען ערוצים…';
     const data = await api('/api/channels');
@@ -110,10 +186,11 @@
       div.className = 'ch';
       div.onclick = ()=>openChannel(ch.channel_id);
       div.innerHTML = `
-        <img class="thumb" src="${esc(ch.thumbnail_url||'')}" onerror="this.style.display='none'" />
+        <img class="thumb" src="${esc(ch.thumbnail_url||'')}" loading="lazy" decoding="async"
+             onerror="this.style.display='none'" />
         <div>
           <div class="title">${esc(ch.title || ch.channel_id)}</div>
-          <div class="muted" style="font-size:12px">${esc(ch.channel_id)}</div>
+          <div class="muted small">${esc(ch.channel_id)}</div>
         </div>
       `;
       box.appendChild(div);
@@ -136,9 +213,49 @@
     }
   }
 
-  function youtubePlaylistUrl(playlistId){
-    // תצוגת פלייליסט ביוטיוב
-    return `https://www.youtube.com/playlist?list=${encodeURIComponent(playlistId)}`;
+  async function hydratePlaylistThumbs(){
+    const imgs = Array.from(document.querySelectorAll('img[data-pl]'));
+    const ids = imgs.map(img => img.getAttribute('data-pl')).filter(Boolean);
+
+    // dedupe
+    const uniq = [...new Set(ids)];
+
+    // fetch oEmbed with small concurrency
+    const results = await mapLimit(uniq, 4, async (plid)=>{
+      const url = youtubePlaylistEmbedUrl(plid);
+      const data = await oembed(url);
+      return { plid, thumb: data?.thumbnail_url || null };
+    });
+
+    const map = new Map(results.map(r=>[r.plid, r.thumb]));
+    for(const img of imgs){
+      const plid = img.getAttribute('data-pl');
+      const thumb = map.get(plid);
+      if (thumb) img.src = thumb;
+      else img.style.display = 'none';
+    }
+  }
+
+  async function hydrateChannelAvatar(channelId){
+    // אם אין thumbnail_url מהשרת — ננסה oEmbed לערוץ (לא תמיד נתמך, אז יש fallback)
+    const img = document.querySelector('img[data-channel-avatar="1"]');
+    if (!img) return;
+    if (img.getAttribute('data-has-src') === "1") return;
+
+    const tryUrls = [
+      `https://www.youtube.com/channel/${encodeURIComponent(channelId)}`
+    ];
+
+    for (const u of tryUrls) {
+      const data = await oembed(u);
+      if (data?.thumbnail_url) {
+        img.src = data.thumbnail_url;
+        img.setAttribute('data-has-src', "1");
+        return;
+      }
+    }
+
+    img.style.display = 'none';
   }
 
   async function openChannel(channel_id){
@@ -158,11 +275,17 @@
     const playlists = data.playlists || [];
     const vids = data.videos || [];
 
+    const hasChThumb = !!(ch.thumbnail_url && ch.thumbnail_url.trim());
+
     let html = `
       <div class="row" style="justify-content:space-between">
-        <div>
-          <div class="title" style="font-size:20px">${esc(ch.title || ch.channel_id)}</div>
-          <div class="muted">${esc(ch.channel_id)}</div>
+        <div class="row">
+          <img class="thumb" data-channel-avatar="1" ${hasChThumb ? `src="${esc(ch.thumbnail_url)}" data-has-src="1"` : ``}
+               loading="lazy" decoding="async" onerror="this.style.display='none'"/>
+          <div>
+            <div class="title" style="font-size:20px">${esc(ch.title || ch.channel_id)}</div>
+            <div class="muted small">${esc(ch.channel_id)}</div>
+          </div>
         </div>
         <div class="row">
           ${back}
@@ -172,9 +295,9 @@
       <div class="hr"></div>
     `;
 
-    // ===== Playlists (NEW) =====
+    // Playlists (with client-side oEmbed thumbs)
     html += `
-      <details class="playlists" ${playlists.length ? "" : ""}>
+      <details class="playlists">
         <summary>פלייליסטים (${playlists.length})</summary>
         <div class="pl-list">
     `;
@@ -187,12 +310,18 @@
         const count = (p.item_count ?? null);
         html += `
           <div class="pl-item">
-            <div class="title">${esc(p.title || p.playlist_id)}</div>
-            <div class="pl-meta muted">
-              <span class="pill">${esc(p.playlist_id)}</span>
-              ${d ? `<span class="pill">${esc(d)}</span>` : ``}
-              ${count !== null ? `<span class="pill">${count} סרטונים</span>` : ``}
-              <a class="pill" target="_blank" href="${youtubePlaylistUrl(p.playlist_id)}">פתח</a>
+            <div class="plRow">
+              <img class="plthumb" data-pl="${esc(p.playlist_id)}" loading="lazy" decoding="async"
+                   alt="" />
+              <div style="flex:1">
+                <div class="title">${esc(p.title || p.playlist_id)}</div>
+                <div class="pl-meta muted">
+                  <span class="pill">${esc(p.playlist_id)}</span>
+                  ${d ? `<span class="pill">${esc(d)}</span>` : ``}
+                  ${count !== null ? `<span class="pill">${count} סרטונים</span>` : ``}
+                  <a class="pill" target="_blank" href="${youtubePlaylistPageUrl(p.playlist_id)}">פתח</a>
+                </div>
+              </div>
             </div>
           </div>
         `;
@@ -204,7 +333,7 @@
       <div class="hr"></div>
     `;
 
-    // ===== Videos =====
+    // Videos (with direct thumbnail URL)
     html += `<div class="muted">סרטונים אחרונים (${vids.length})</div><div class="videos">`;
 
     if(vids.length===0){
@@ -214,11 +343,18 @@
         const d = fmtDate(v.published_at);
         html += `
           <div class="video">
-            <div class="title">${esc(v.title)}</div>
-            <div class="meta muted">
-              <span class="pill">${esc(v.video_id)}</span>
-              ${d ? `<span class="pill">${esc(d)}</span>` : ``}
-              <a class="pill" target="_blank" href="https://www.youtube.com/watch?v=${encodeURIComponent(v.video_id)}">צפה</a>
+            <div class="videoRow">
+              <img class="vthumb" loading="lazy" decoding="async"
+                   src="${videoThumbUrl(v.video_id)}"
+                   onerror="this.style.display='none'" />
+              <div style="flex:1">
+                <div class="title">${esc(v.title)}</div>
+                <div class="meta muted">
+                  <span class="pill">${esc(v.video_id)}</span>
+                  ${d ? `<span class="pill">${esc(d)}</span>` : ``}
+                  <a class="pill" target="_blank" href="https://www.youtube.com/watch?v=${encodeURIComponent(v.video_id)}">צפה</a>
+                </div>
+              </div>
             </div>
           </div>
         `;
@@ -227,6 +363,10 @@
     html += `</div>`;
 
     $('content').innerHTML = html;
+
+    // hydrate thumbs after render
+    hydratePlaylistThumbs().catch(()=>{});
+    if (!hasChThumb) hydrateChannelAvatar(channel_id).catch(()=>{});
   }
 
   async function doSearch(){
@@ -252,12 +392,19 @@
       const d = fmtDate(r.published_at);
       html += `
         <div class="video">
-          <div class="title">${esc(r.title)}</div>
-          <div class="meta muted">
-            <span class="pill">${esc(r.video_id)}</span>
-            ${d ? `<span class="pill">${esc(d)}</span>` : ``}
-            <span class="pill">${esc(r.channel_title || r.channel_id)}</span>
-            <a class="pill" target="_blank" href="https://www.youtube.com/watch?v=${encodeURIComponent(r.video_id)}">צפה</a>
+          <div class="videoRow">
+            <img class="vthumb" loading="lazy" decoding="async"
+                 src="${videoThumbUrl(r.video_id)}"
+                 onerror="this.style.display='none'" />
+            <div style="flex:1">
+              <div class="title">${esc(r.title)}</div>
+              <div class="meta muted">
+                <span class="pill">${esc(r.video_id)}</span>
+                ${d ? `<span class="pill">${esc(d)}</span>` : ``}
+                <span class="pill">${esc(r.channel_title || r.channel_id)}</span>
+                <a class="pill" target="_blank" href="https://www.youtube.com/watch?v=${encodeURIComponent(r.video_id)}">צפה</a>
+              </div>
+            </div>
           </div>
         </div>
       `;
