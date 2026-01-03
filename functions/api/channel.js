@@ -1,3 +1,5 @@
+// functions/api/channel.js
+
 export async function onRequest({ env, request }) {
   const url = new URL(request.url);
   const channel_id = (url.searchParams.get("channel_id") || "").trim();
@@ -18,7 +20,7 @@ export async function onRequest({ env, request }) {
   `).bind(ch.id).first();
 
   const playlists = await env.DB.prepare(`
-    SELECT playlist_id, title, thumbnail_url, published_at, item_count
+    SELECT playlist_id, title, thumb_video_id, published_at, item_count
     FROM playlists
     WHERE channel_int=?
     ORDER BY (published_at IS NULL), published_at DESC, id DESC
