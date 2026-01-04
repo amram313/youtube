@@ -45,6 +45,32 @@ function topicFromLinkHeader(linkHeader){
   return m?m[1]:null;
 }
 
+async function logWebsubEvent(env, data, { force = false } = {}) {
+  if (!force && env.WEBSUB_LOG_EVENTS !== "1") return;
+  const {
+    received_at,
+    method,
+    topic_url,
+    status_code,
+    error = null,
+    entries_count = null,
+    first_video_id = null,
+  } = data;
+
+  await env.DB.prepare(`
+    INSERT INTO websub_events(received_at, method, topic_url, status_code, error, entries_count, first_video_id)
+    VALUES(?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    received_at,
+    method,
+    topic_url,
+    status_code,
+    error,
+    entries_count,
+    first_video_id
+  ).run();
+}
+
 export async function onRequest({ env, request }) {
   const url = new URL(request.url);
 
@@ -55,10 +81,13 @@ export async function onRequest({ env, request }) {
     const lease = parseInt(url.searchParams.get("hub.lease_seconds") || "0", 10) || 0;
 
     if (!challenge) {
-      await env.DB.prepare(`
-        INSERT INTO websub_events(received_at, method, topic_url, status_code, error)
-        VALUES(?, 'GET', ?, 400, 'missing challenge')
-      `).bind(nowSec(), topic || null).run();
+      await logWebsubEvent(env, {
+        received_at: nowSec(),
+        method: "GET",
+        topic_url: topic || null,
+        status_code: 400,
+        error: "missing challenge",
+      }, { force: true });
       return new Response("missing hub.challenge", { status: 400 });
     }
 
@@ -86,10 +115,12 @@ export async function onRequest({ env, request }) {
       }
     }
 
-    await env.DB.prepare(`
-      INSERT INTO websub_events(received_at, method, topic_url, status_code)
-      VALUES(?, 'GET', ?, 200)
-    `).bind(nowSec(), topic || null).run();
+    await logWebsubEvent(env, {
+      received_at: nowSec(),
+      method: "GET",
+      topic_url: topic || null,
+      status_code: 200,
+    });
 
     return new Response(challenge, {
       status: 200,
@@ -108,10 +139,13 @@ export async function onRequest({ env, request }) {
       const sig = request.headers.get("x-hub-signature") || "";
       const expected = "sha1=" + (await hmacSha1Hex(env.WEBSUB_SECRET, bodyU8));
       if (sig !== expected) {
-        await env.DB.prepare(`
-          INSERT INTO websub_events(received_at, method, topic_url, status_code, error)
-          VALUES(?, 'POST', ?, 403, 'bad signature')
-        `).bind(nowSec(), topic).run();
+        await logWebsubEvent(env, {
+          received_at: nowSec(),
+          method: "POST",
+          topic_url: topic,
+          status_code: 403,
+          error: "bad signature",
+        }, { force: true });
         return new Response("bad signature", { status: 403 });
       }
     }
@@ -119,10 +153,14 @@ export async function onRequest({ env, request }) {
     const xml = new TextDecoder().decode(bodyU8);
     const entries = extractEntries(xml);
 
-    await env.DB.prepare(`
-      INSERT INTO websub_events(received_at, method, topic_url, status_code, entries_count, first_video_id)
-      VALUES(?, 'POST', ?, 204, ?, ?)
-    `).bind(nowSec(), topic, entries.length, entries[0]?.videoId || null).run();
+    await logWebsubEvent(env, {
+      received_at: nowSec(),
+      method: "POST",
+      topic_url: topic,
+      status_code: 204,
+      entries_count: entries.length,
+      first_video_id: entries[0]?.videoId || null,
+    });
 
     if (!entries.length) return new Response(null, { status: 204 });
 
@@ -155,6 +193,10 @@ export async function onRequest({ env, request }) {
             title         = excluded.title,
             published_at  = COALESCE(excluded.published_at, videos.published_at),
             updated_at    = excluded.updated_at
+          WHERE
+            excluded.channel_int IS NOT videos.channel_int OR
+            excluded.title IS NOT videos.title OR
+            excluded.published_at IS NOT videos.published_at
         `).bind(e.videoId, channel_int, title, e.published_at ?? null, now)
       );
     }
