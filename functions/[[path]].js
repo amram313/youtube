@@ -1,31 +1,29 @@
 export async function onRequest(context) {
   const { request, env } = context;
   const url = new URL(request.url);
-
-  // רק HTML (לא לגעת ב-assets / api)
-  if (request.method !== "GET") return env.ASSETS.fetch(request);
-  const accept = request.headers.get("Accept") || "";
-  if (!accept.includes("text/html")) return env.ASSETS.fetch(request);
-
   const path = url.pathname;
 
-  // לא לגעת ב-API ובקבצים סטטיים
+  // רק GET
+  if (request.method !== "GET") return env.ASSETS.fetch(request);
+
+  // אל תיגע ב-API ובקבצים סטטיים
   if (path.startsWith("/api/")) return env.ASSETS.fetch(request);
-  if (path.includes(".")) return env.ASSETS.fetch(request);
+  if (path.includes(".")) return env.ASSETS.fetch(request); // assets, favicon וכו'
 
-  // תמיד נחזיר את ה-SPA (index) כדי שרענון לא ייפול ל-404
-  const indexRes = await env.ASSETS.fetch(new Request(new URL("/", url), request)); // :contentReference[oaicite:1]{index=1}
+  // תמיד תחזיר SPA (index.html) כדי שרענון/שיתוף לא יפלו ל-404
+  const indexRes = await env.ASSETS.fetch(new Request(new URL("/", url), request));
 
-  // בונים OG לפי סוג הדף (וידאו/פלייליסט/ערוץ)
+  // נסה לבנות OG לפי סוג הדף
   const meta = await buildOgMeta({ url, env });
 
-  // אם לא זיהינו - תחזיר את ה-SPA רגיל בלי OG דינמי
+  // אם לא זיהינו משהו - תחזיר index רגיל
   if (!meta) return indexRes;
 
-  const rewritten = new HTMLRewriter() // :contentReference[oaicite:2]{index=2}
+  // חשוב: PREPEND כדי שיהיה בתחילת ה-head (וואטסאפ לפעמים מפספס דברים מאוחר מדי)
+  const rewritten = new HTMLRewriter()
     .on("head", {
       element(el) {
-        el.append(
+        el.prepend(
           `
 <meta property="og:type" content="${esc(meta.type)}">
 <meta property="og:site_name" content="YouTube">
@@ -44,7 +42,7 @@ export async function onRequest(context) {
     })
     .transform(indexRes);
 
-  // אופציונלי: פריוויו מהיר לבוטים (לא חובה)
+  // קאש קטן כדי שסורקים לא יפוצצו בקשות
   const out = new Response(rewritten.body, rewritten);
   out.headers.set("Cache-Control", "public, max-age=300");
   return out;
@@ -53,12 +51,12 @@ export async function onRequest(context) {
 async function buildOgMeta({ url, env }) {
   const p = url.pathname;
 
-  // 1) וידאו אצלך: /<11chars>
+  // 1) וידאו: /<11chars>
   const mVideo = p.match(/^\/([A-Za-z0-9_-]{11})$/);
   if (mVideo) {
     const id = mVideo[1];
 
-    // אם יש לך טבלת videos – אפשר לשדרג פה, אבל נשאיר עובד גם בלי:
+    // אם יש לך טבלת videos אפשר לשדרג לכותרת אמיתית, כרגע fallback עובד:
     return {
       type: "video.other",
       url: url.toString(),
@@ -68,12 +66,11 @@ async function buildOgMeta({ url, env }) {
     };
   }
 
-  // 2) פלייליסט אצלך: /PL....
+  // 2) פלייליסט: /PL....
   const mPl = p.match(/^\/(PL[A-Za-z0-9_-]+)$/);
   if (mPl) {
     const playlistId = mPl[1];
 
-    // שליפה מ-D1 לפי מה שהראית בצילום: playlists(playlist_id, title, thumb_video_id)
     const row = await firstRow(env.DB, `
       SELECT title, thumb_video_id
       FROM playlists
@@ -81,19 +78,8 @@ async function buildOgMeta({ url, env }) {
       LIMIT 1
     `, [playlistId]);
 
-    if (!row) {
-      // fallback מינימלי אם לא נמצא
-      return {
-        type: "website",
-        url: url.toString(),
-        title: "פלייליסט",
-        description: "צפה בפלייליסט",
-        image: `${url.origin}/default-og.jpg`,
-      };
-    }
-
-    const title = row.title || "פלייליסט";
-    const thumbVideoId = row.thumb_video_id || "";
+    const title = row?.title || "פלייליסט";
+    const thumbVideoId = row?.thumb_video_id || "";
     const image = thumbVideoId
       ? `https://i.ytimg.com/vi/${thumbVideoId}/hqdefault.jpg`
       : `${url.origin}/default-og.jpg`;
@@ -107,12 +93,11 @@ async function buildOgMeta({ url, env }) {
     };
   }
 
-  // 3) ערוץ אצלך: /UC.../<tab>
-  const mCh = p.match(/^\/(UC[A-Za-z0-9_-]{10,})(?:\/([^/]+))?$/);
+  // 3) ערוץ: /UC... וגם /UC.../videos
+  const mCh = p.match(/^\/(UC[A-Za-z0-9_-]{10,})(?:\/[^/]*)?$/);
   if (mCh) {
     const channelId = mCh[1];
 
-    // שליפה מ-D1 לפי מה שהראית: channels(channel_id, title, thumbnail_url)
     const row = await firstRow(env.DB, `
       SELECT title, thumbnail_url
       FROM channels
@@ -120,22 +105,15 @@ async function buildOgMeta({ url, env }) {
       LIMIT 1
     `, [channelId]);
 
-    if (!row) {
-      return {
-        type: "website",
-        url: url.toString(),
-        title: "ערוץ",
-        description: "צפה בערוץ",
-        image: `${url.origin}/default-og.jpg`,
-      };
-    }
+    const title = row?.title || "ערוץ";
+    const image = normalizeUrl(row?.thumbnail_url, url.origin) || `${url.origin}/default-og.jpg`;
 
     return {
       type: "website",
       url: url.toString(),
-      title: row.title || "ערוץ",
+      title,
       description: "צפה בערוץ",
-      image: row.thumbnail_url || `${url.origin}/default-og.jpg`,
+      image,
     };
   }
 
@@ -143,9 +121,18 @@ async function buildOgMeta({ url, env }) {
 }
 
 async function firstRow(DB, sql, params) {
-  if (!DB) return null; // אם binding שונה אצלך – תעדכן את השם (בד"כ DB)
+  // אם ה-binding אצלך לא נקרא DB, החלף פה את env.DB
+  if (!DB) return null;
   const res = await DB.prepare(sql).bind(...params).all();
   return res?.results?.[0] || null;
+}
+
+function normalizeUrl(u, origin) {
+  if (!u) return "";
+  if (u.startsWith("http://") || u.startsWith("https://")) return u;
+  if (u.startsWith("//")) return "https:" + u;
+  if (u.startsWith("/")) return origin + u;
+  return u;
 }
 
 function esc(s) {
