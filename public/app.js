@@ -1,504 +1,390 @@
-const app = document.getElementById("app");
-const qInput = document.getElementById("q");
-const searchForm = document.getElementById("searchForm");
+const $ = (id) => document.getElementById(id);
 
-function esc(s) {
-  return String(s ?? "").replace(/[&<>"']/g, (c) => ({
-    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
-  }[c]));
+function esc(s){return (s||"").replace(/[&<>"']/g,c=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]))}
+function fmtDate(unix){
+  if(!unix) return "";
+  try { return new Date(unix*1000).toLocaleDateString('he-IL', { year:'numeric', month:'2-digit', day:'2-digit' }); }
+  catch { return ""; }
 }
+function ytVideoThumb(videoId, q="mqdefault"){ return videoId ? `https://i.ytimg.com/vi/${videoId}/${q}.jpg` : ""; }
 
-function isChannelId(x){ return /^UC[\w-]{10,}$/.test(x); }
-function isPlaylistId(x){ return /^PL[\w-]{8,}$/.test(x); }
-// רוב מזהי וידאו הם 11 תווים, אבל לא ננעל על זה חזק
-function looksLikeVideoId(x){ return /^[\w-]{8,}$/.test(x) && !isChannelId(x) && !isPlaylistId(x); }
-
-function videoThumb(id){ return `https://i.ytimg.com/vi/${id}/mqdefault.jpg`; }
-
-// אצלך לפעמים שמור thumbnail_id, לפעמים thumbnail_url (ישנים) — נתמודד עם שניהם
-function channelAvatar(ch){
-  if (ch?.thumbnail_id) return `https://yt3.ggpht.com/${ch.thumbnail_id}=s176-c-k-c0x00ffffff-no-rj`;
-  if (ch?.thumbnail_url) return ch.thumbnail_url;
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120"><rect width="100%" height="100%" fill="#222"/><text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" fill="#bbb" font-family="Arial" font-size="18">UC</text></svg>`)}`;
-}
-
-function playlistThumb(p){
-  if (p?.thumbnail_id) return `https://i.ytimg.com/vi/${p.thumbnail_id}/mqdefault.jpg`; // אם שמרת "videoId" כתמונה
-  if (p?.thumbnail_url) return p.thumbnail_url;
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="100%" height="100%" fill="#222"/><text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" fill="#bbb" font-family="Arial" font-size="18">Playlist</text></svg>`)}`;
-}
-
-function fmtDate(v){
-  if (!v) return "";
-  // number = seconds/ms
-  if (typeof v === "number"){
-    const ms = v > 2_000_000_000_000 ? v : (v > 2_000_000_000 ? v*1000 : v);
-    const d = new Date(ms);
-    if (!isNaN(d)) return d.toLocaleDateString("he-IL");
-  }
-  // string
-  const d = new Date(v);
-  if (!isNaN(d)) return d.toLocaleDateString("he-IL");
-  return String(v);
-}
-
-async function jget(url){
+async function api(url){
   const r = await fetch(url);
   const t = await r.text();
-  let data;
-  try { data = JSON.parse(t); } catch { data = t; }
-  if (!r.ok) throw new Error((data && data.error) ? data.error : `HTTP ${r.status}`);
-  return data;
+  if(!r.ok) throw new Error(`${r.status} ${t.slice(0,200)}`);
+  return JSON.parse(t);
 }
 
-function navTo(path){
+function setPage(inner){
+  $("page").innerHTML = `<div class="pad">${inner}</div>`;
+}
+
+function navigate(path){
   history.pushState({}, "", path);
-  route();
+  render().catch(showErr);
 }
 
-document.addEventListener("click", (e)=>{
-  const a = e.target.closest("a[data-link]");
-  if (!a) return;
-  e.preventDefault();
-  navTo(a.getAttribute("href"));
-});
-
-window.addEventListener("popstate", route);
-
-searchForm.addEventListener("submit", (e)=>{
-  e.preventDefault();
-  const q = qInput.value.trim();
-  navTo(`/search?q=${encodeURIComponent(q)}`);
-});
-
-function setTitle(t){ document.title = t ? `${t} • YouTube Catalog` : "YouTube Catalog"; }
-
-function skelList(n=6){
-  const items = Array.from({length:n}).map(()=>`
-    <div class="item">
-      <div class="item__media">
-        <div class="thumb skel"></div>
-      </div>
-      <div class="item__body">
-        <div class="skel" style="height:16px; width:80%; margin-bottom:10px;"></div>
-        <div class="skel" style="height:12px; width:55%;"></div>
-      </div>
-    </div>
-  `).join("");
-  return `<div class="stack">${items}</div>`;
+function hookLinks(){
+  document.addEventListener("click", (e)=>{
+    const a = e.target.closest("a");
+    if(!a) return;
+    const href = a.getAttribute("href") || "";
+    const target = a.getAttribute("target");
+    if(target === "_blank") return;
+    if(!href.startsWith("/")) return;
+    if(!a.hasAttribute("data-link")) return;
+    e.preventDefault();
+    navigate(href);
+  });
 }
 
-function renderError(msg){
-  app.innerHTML = `
-    <div class="card" style="padding:16px">
-      <div class="h1">שגיאה</div>
-      <div class="muted">${esc(msg)}</div>
-    </div>
-  `;
+window.addEventListener("popstate", ()=>render().catch(showErr));
+
+function route(){
+  const p = location.pathname.replace(/\/+$/,"") || "/";
+  const parts = p.split("/").filter(Boolean);
+  const qs = new URLSearchParams(location.search);
+  return { p, parts, qs };
 }
 
-function renderNotFound(){
-  app.innerHTML = `
-    <div class="card" style="padding:16px">
-      <div class="h1">לא נמצא</div>
-      <div class="muted">העמוד שביקשת לא קיים.</div>
-    </div>
-  `;
+function showErr(err){
+  setPage(`<div class="h1">שגיאה</div><p class="sub">${esc(err?.message || String(err))}</p>`);
 }
+
+function headerSearch(){
+  const form = $("searchForm");
+  const input = $("searchInput");
+  form.onsubmit = (e)=>{
+    e.preventDefault();
+    const q = (input.value||"").trim();
+    if(!q) return;
+    navigate(`/search?q=${encodeURIComponent(q)}`);
+  };
+}
+
+/* --- PAGES --- */
 
 async function pageHome(){
-  setTitle("בית");
-  app.innerHTML = `
-    <div class="stack">
-      <div class="card" style="padding:16px">
-        <div class="h1">סרטונים אחרונים</div>
-        <div class="muted">פיד אחרון מה־DB (מהיר, בלי להכביד).</div>
-      </div>
-      <div class="card" style="padding:16px">
-        ${skelList(8)}
-      </div>
-    </div>
-  `;
+  // דורש endpoint קטן api/latest (קובץ למטה)
+  setPage(`<div class="muted">טוען…</div>`);
+  const data = await api(`/api/latest?limit=40`);
+  const vids = data.videos || [];
 
-  // אם יש לך endpoint כזה – מעולה. אם לא, ניפול ל־search ריק/לא קיים.
-  let data = null;
-  try {
-    data = await jget(`/api/latest?limit=60`);
-  } catch {
-    // fallback: אם אין latest – נציג הסבר קצר במקום “לשבור” את האתר
-    app.innerHTML = `
-      <div class="card" style="padding:16px">
-        <div class="h1">עמוד בית</div>
-        <div class="muted">
-          כדי להציג “אחרונים”, צריך endpoint קטן: <b>/api/latest</b> שמחזיר 60 סרטונים אחרונים מה־DB.
-          <br/>ברגע שתוסיף אותו – העמוד הזה יתמלא אוטומטית.
-        </div>
-      </div>
-    `;
-    return;
-  }
+  setPage(`
+    <div class="h1">בית</div>
+    <p class="sub">הסרטונים האחרונים מכל הערוצים</p>
+    <div class="hr"></div>
 
-  const videos = data?.videos ?? data ?? [];
-  app.innerHTML = `
-    <div class="card" style="padding:16px">
-      <div class="h1">סרטונים אחרונים</div>
+    ${vids.length ? `
       <div class="grid">
-        ${videos.map(v => `
-          <a class="card" data-link href="/${esc(v.video_id)}" style="padding:12px; display:block">
-            <div class="thumb">
-              <img loading="lazy" src="${videoThumb(esc(v.video_id))}" alt="">
-            </div>
-            <div style="padding-top:10px">
-              <div class="item__title">${esc(v.title)}</div>
-              <div class="item__meta">
-                <span>${esc(v.channel_title ?? "")}</span>
-                <span>${fmtDate(v.published_at)}</span>
+        ${vids.map(v=>`
+          <a class="card" href="/${encodeURIComponent(v.video_id)}" data-link>
+            <img class="thumb16x9" loading="lazy" decoding="async" src="${esc(ytVideoThumb(v.video_id))}">
+            <div class="cardBody">
+              <div class="cardTitle">${esc(v.title || v.video_id)}</div>
+              <div class="cardMeta">
+                <span>${esc(v.channel_title || v.channel_id)}</span>
+                ${fmtDate(v.published_at) ? `<span>${esc(fmtDate(v.published_at))}</span>` : ``}
               </div>
             </div>
           </a>
         `).join("")}
       </div>
-    </div>
-  `;
+    ` : `<div class="muted">אין עדיין סרטונים במסד.</div>`}
+  `);
 }
 
 async function pageChannels(){
-  setTitle("ערוצים");
-  app.innerHTML = `
-    <div class="card" style="padding:16px">
-      <div class="h1">ערוצים</div>
-      <div class="muted">רשימת כל הערוצים בקטלוג.</div>
-      <div class="hr"></div>
-      ${skelList(6)}
-    </div>
-  `;
-  const data = await jget("/api/channels");
-  const channels = data?.channels ?? data ?? [];
-  app.innerHTML = `
-    <div class="card" style="padding:16px">
-      <div class="h1">ערוצים</div>
-      <div class="stack">
-        ${channels.map(ch => `
-          <a class="item" data-link href="/${esc(ch.channel_id)}">
-            <div class="avatar">
-              <img loading="lazy" src="${channelAvatar(ch)}" alt="">
-            </div>
-            <div class="item__body">
-              <div class="item__title">${esc(ch.title ?? "(ללא כותרת)")}</div>
-              <div class="item__meta"><span>${esc(ch.channel_id)}</span></div>
+  setPage(`<div class="muted">טוען ערוצים…</div>`);
+  const data = await api(`/api/channels`);
+  const channels = data.channels || [];
+
+  setPage(`
+    <div class="h1">ערוצים</div>
+    <p class="sub">כל הערוצים במערכת</p>
+    <div class="hr"></div>
+
+    ${channels.length ? `
+      <div class="grid">
+        ${channels.map(ch=>`
+          <a class="card" href="/${encodeURIComponent(ch.channel_id)}/videos" data-link>
+            <div class="cardBody avatarRow">
+              ${ch.thumbnail_url ? `<img class="avatar" loading="lazy" decoding="async" src="${esc(ch.thumbnail_url)}" onerror="this.style.display='none'">`
+                                 : `<div class="avatar"></div>`}
+              <div style="min-width:0">
+                <div class="cardTitle" style="margin:0">${esc(ch.title || ch.channel_id)}</div>
+                <div class="cardMeta">${esc(ch.channel_id)}</div>
+              </div>
             </div>
           </a>
         `).join("")}
       </div>
-    </div>
-  `;
+    ` : `<div class="muted">אין ערוצים עדיין.</div>`}
+  `);
 }
 
 async function pagePlaylists(){
-  setTitle("פלייליסטים");
-  app.innerHTML = `
-    <div class="card" style="padding:16px">
-      <div class="h1">פלייליסטים</div>
-      <div class="muted">רשימת כל הפלייליסטים בקטלוג.</div>
-      <div class="hr"></div>
-      ${skelList(6)}
-    </div>
-  `;
+  // דורש endpoint קטן api/playlists (קובץ למטה)
+  setPage(`<div class="muted">טוען פלייליסטים…</div>`);
+  const data = await api(`/api/playlists?limit=60`);
+  const playlists = data.playlists || [];
 
-  // אם יש לך endpoint כזה – מצוין.
-  let data = null;
-  try {
-    data = await jget("/api/playlists");
-  } catch {
-    app.innerHTML = `
-      <div class="card" style="padding:16px">
-        <div class="h1">פלייליסטים</div>
-        <div class="muted">
-          כדי להציג רשימת פלייליסטים, צריך endpoint: <b>/api/playlists</b>.
-          <br/>אם כבר יש לך אותו – תבדוק שהוא מחזיר JSON עם playlists.
-        </div>
+  setPage(`
+    <div class="h1">פלייליסטים</div>
+    <p class="sub">רשימת פלייליסטים מכל הערוצים</p>
+    <div class="hr"></div>
+
+    ${playlists.length ? `
+      <div class="grid">
+        ${playlists.map(p=>`
+          <a class="card" href="/${encodeURIComponent(p.playlist_id)}" data-link>
+            <img class="thumb16x9" loading="lazy" decoding="async"
+                 src="${esc(p.thumb_video_id ? ytVideoThumb(p.thumb_video_id) : "")}"
+                 onerror="this.style.display='none'">
+            <div class="cardBody">
+              <div class="cardTitle">${esc(p.title || p.playlist_id)}</div>
+              <div class="cardMeta">
+                <span>${esc(p.channel_title || p.channel_id)}</span>
+                ${p.item_count!=null ? `<span>${p.item_count} סרטונים</span>` : ``}
+              </div>
+            </div>
+          </a>
+        `).join("")}
       </div>
-    `;
+    ` : `<div class="muted">אין פלייליסטים עדיין.</div>`}
+  `);
+}
+
+async function pageSearch(q){
+  if(!q){
+    setPage(`<div class="h1">חיפוש</div><p class="sub">הקלד מילה בחיפוש למעלה.</p>`);
     return;
   }
+  $("searchInput").value = q;
 
-  const playlists = data?.playlists ?? data ?? [];
-  app.innerHTML = `
-    <div class="card" style="padding:16px">
-      <div class="h1">פלייליסטים</div>
+  setPage(`<div class="muted">מחפש…</div>`);
+  const data = await api(`/api/search?q=${encodeURIComponent(q)}`);
+  const results = data.results || [];
+
+  setPage(`
+    <div class="h1">תוצאות חיפוש</div>
+    <p class="sub">מילת חיפוש: <b>${esc(q)}</b></p>
+    <div class="hr"></div>
+
+    ${results.length ? `
       <div class="grid">
-        ${playlists.map(p => `
-          <a class="card" data-link href="/${esc(p.playlist_id)}" style="padding:12px; display:block">
-            <div class="thumb">
-              <img loading="lazy" src="${playlistThumb(p)}" alt="">
-            </div>
-            <div style="padding-top:10px">
-              <div class="item__title">${esc(p.title ?? "(ללא כותרת)")}</div>
-              <div class="item__meta">
-                <span>${esc(p.channel_title ?? "")}</span>
+        ${results.map(r=>`
+          <a class="card" href="/${encodeURIComponent(r.video_id)}" data-link>
+            <img class="thumb16x9" loading="lazy" decoding="async" src="${esc(ytVideoThumb(r.video_id))}">
+            <div class="cardBody">
+              <div class="cardTitle">${esc(r.title || r.video_id)}</div>
+              <div class="cardMeta">
+                <span>${esc(r.channel_title || r.channel_id)}</span>
+                ${fmtDate(r.published_at) ? `<span>${esc(fmtDate(r.published_at))}</span>` : ``}
               </div>
             </div>
           </a>
         `).join("")}
       </div>
-    </div>
-  `;
+    ` : `<div class="muted">אין תוצאות.</div>`}
+  `);
 }
 
-async function pageSearch(params){
-  const q = (params.get("q") ?? "").trim();
-  setTitle(q ? `חיפוש: ${q}` : "חיפוש");
-  qInput.value = q;
+async function pageChannel(channel_id, tab){
+  setPage(`<div class="muted">טוען ערוץ…</div>`);
+  const data = await api(`/api/channel?channel_id=${encodeURIComponent(channel_id)}`);
+  const ch = data.channel;
+  const videos = data.videos || [];
+  const playlists = data.playlists || [];
+  const activeTab = (tab === "playlists") ? "playlists" : "videos";
 
-  app.innerHTML = `
-    <div class="card" style="padding:16px">
-      <div class="h1">תוצאות חיפוש</div>
-      <div class="muted">${q ? `עבור: “${esc(q)}”` : "הקלד מילים לחיפוש."}</div>
+  const header = `
+    <div class="avatarRow">
+      ${ch.thumbnail_url ? `<img class="avatar" style="width:64px;height:64px" loading="lazy" decoding="async" src="${esc(ch.thumbnail_url)}" onerror="this.style.display='none'">`
+                         : `<div class="avatar" style="width:64px;height:64px"></div>`}
+      <div style="min-width:0">
+        <div class="h1" style="margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(ch.title || ch.channel_id)}</div>
+        <p class="sub" style="margin-top:4px">${esc(ch.channel_id)}</p>
+      </div>
+    </div>
+
+    <div class="btnRow">
+      <a class="btn" target="_blank" rel="noreferrer" href="https://www.youtube.com/channel/${encodeURIComponent(ch.channel_id)}">פתח ביוטיוב</a>
+    </div>
+
+    <div class="tabs">
+      <a class="tab ${activeTab==="videos"?"active":""}" href="/${encodeURIComponent(channel_id)}/videos" data-link>סרטונים</a>
+      <a class="tab ${activeTab==="playlists"?"active":""}" href="/${encodeURIComponent(channel_id)}/playlists" data-link>פלייליסטים</a>
+    </div>
+  `;
+
+  let body = "";
+  if(activeTab === "videos"){
+    body = `
       <div class="hr"></div>
-      ${q ? skelList(8) : ""}
-    </div>
-  `;
-
-  if (!q) return;
-
-  const data = await jget(`/api/search?q=${encodeURIComponent(q)}&limit=50`);
-  const videos = data?.videos ?? data?.results ?? data ?? [];
-
-  app.innerHTML = `
-    <div class="card" style="padding:16px">
-      <div class="h1">תוצאות חיפוש</div>
-      <div class="muted">נמצאו ${videos.length} תוצאות</div>
-      <div class="hr"></div>
-      <div class="stack">
-        ${videos.map(v => `
-          <a class="item" data-link href="/${esc(v.video_id)}">
-            <div class="item__media">
-              <div class="thumb">
-                <img loading="lazy" src="${videoThumb(esc(v.video_id))}" alt="">
-              </div>
-            </div>
-            <div class="item__body">
-              <div class="item__title">${esc(v.title)}</div>
-              <div class="item__meta">
-                <span>${esc(v.channel_title ?? "")}</span>
-                <span>${fmtDate(v.published_at)}</span>
-              </div>
-            </div>
-          </a>
-        `).join("")}
-      </div>
-    </div>
-  `;
-}
-
-async function pageChannel(channelId, params){
-  const tab = (params.get("tab") || "videos"); // videos | playlists
-  setTitle("ערוץ");
-  app.innerHTML = `
-    <div class="card" style="padding:16px">
-      ${skelList(6)}
-    </div>
-  `;
-
-  const data = await jget(`/api/channel?channel_id=${encodeURIComponent(channelId)}&limit=60`);
-  const ch = data?.channel ?? data?.ch ?? data;
-  const videos = data?.videos ?? [];
-  const playlists = data?.playlists ?? [];
-
-  setTitle(ch?.title ?? "ערוץ");
-
-  app.innerHTML = `
-    <div class="card">
-      <div class="channelHeader">
-        <div class="avatar"><img loading="lazy" src="${channelAvatar(ch)}" alt=""></div>
-        <div class="stack" style="gap:4px; min-width:0">
-          <div class="h1" style="margin:0">${esc(ch?.title ?? "(ללא כותרת)")}</div>
-          <div class="muted" style="font-size:13px">${esc(channelId)}</div>
-        </div>
-      </div>
-
-      <div class="tabs">
-        <button class="tab ${tab==="videos"?"tab--on":""}" data-tab="videos">סרטונים</button>
-        <button class="tab ${tab==="playlists"?"tab--on":""}" data-tab="playlists">פלייליסטים</button>
-      </div>
-    </div>
-
-    <div style="height:14px"></div>
-
-    ${tab==="videos" ? `
-      <div class="card" style="padding:16px">
-        <div class="h2">סרטונים</div>
-        <div class="stack">
-          ${videos.map(v => `
-            <a class="item" data-link href="/${esc(v.video_id)}">
-              <div class="item__media">
-                <div class="thumb">
-                  <img loading="lazy" src="${videoThumb(esc(v.video_id))}" alt="">
-                </div>
-              </div>
-              <div class="item__body">
-                <div class="item__title">${esc(v.title)}</div>
-                <div class="item__meta">
-                  <span>${fmtDate(v.published_at)}</span>
+      ${videos.length ? `
+        <div class="grid">
+          ${videos.map(v=>`
+            <a class="card" href="/${encodeURIComponent(v.video_id)}" data-link>
+              <img class="thumb16x9" loading="lazy" decoding="async" src="${esc(ytVideoThumb(v.video_id))}">
+              <div class="cardBody">
+                <div class="cardTitle">${esc(v.title || v.video_id)}</div>
+                <div class="cardMeta">
+                  ${fmtDate(v.published_at) ? `<span>${esc(fmtDate(v.published_at))}</span>` : ``}
                 </div>
               </div>
             </a>
           `).join("")}
         </div>
-      </div>
-    ` : `
-      <div class="card" style="padding:16px">
-        <div class="h2">פלייליסטים</div>
-        ${playlists.length ? `
-          <div class="grid">
-            ${playlists.map(p => `
-              <a class="card" data-link href="/${esc(p.playlist_id)}" style="padding:12px; display:block">
-                <div class="thumb">
-                  <img loading="lazy" src="${playlistThumb(p)}" alt="">
+      ` : `<div class="muted">אין עדיין סרטונים במסד לערוץ הזה.</div>`}
+    `;
+  } else {
+    body = `
+      <div class="hr"></div>
+      ${playlists.length ? `
+        <div class="grid">
+          ${playlists.map(p=>`
+            <a class="card" href="/${encodeURIComponent(p.playlist_id)}" data-link>
+              <img class="thumb16x9" loading="lazy" decoding="async"
+                   src="${esc(p.thumb_video_id ? ytVideoThumb(p.thumb_video_id) : "")}"
+                   onerror="this.style.display='none'">
+              <div class="cardBody">
+                <div class="cardTitle">${esc(p.title || p.playlist_id)}</div>
+                <div class="cardMeta">
+                  ${p.item_count!=null ? `<span>${p.item_count} סרטונים</span>` : ``}
                 </div>
-                <div style="padding-top:10px">
-                  <div class="item__title">${esc(p.title ?? "(ללא כותרת)")}</div>
-                </div>
-              </a>
-            `).join("")}
-          </div>
-        ` : `<div class="muted">אין פלייליסטים שמורים לערוץ זה.</div>`}
-      </div>
-    `}
-  `;
-
-  // tabs wiring
-  app.querySelectorAll(".tab").forEach(btn=>{
-    btn.addEventListener("click", ()=>{
-      const t = btn.getAttribute("data-tab");
-      navTo(`/${encodeURIComponent(channelId)}?tab=${encodeURIComponent(t)}`);
-    });
-  });
-}
-
-async function pageVideo(videoId){
-  setTitle("סרטון");
-  app.innerHTML = `
-    <div class="card" style="padding:16px">${skelList(6)}</div>
-  `;
-
-  // ננסה להביא את הוידאו דרך search לפי ה־ID (מינימום תלות ב־endpoint חדש)
-  const s = await jget(`/api/search?q=${encodeURIComponent(videoId)}&limit=5`);
-  const candidates = s?.videos ?? s?.results ?? s ?? [];
-  const v = candidates.find(x => x.video_id === videoId) || candidates[0];
-
-  if (!v) {
-    renderNotFound();
-    return;
-  }
-
-  // הצעות: נביא עוד סרטונים מהערוץ
-  let channelData = null;
-  try {
-    channelData = await jget(`/api/channel?channel_id=${encodeURIComponent(v.channel_id)}&limit=40`);
-  } catch {
-    channelData = { videos: [] };
-  }
-  const suggested = (channelData?.videos ?? []).filter(x => x.video_id !== videoId).slice(0, 18);
-
-  app.innerHTML = `
-    <div class="watch">
-      <section class="watchMain">
-        <div class="player card">
-          <iframe
-            src="https://www.youtube-nocookie.com/embed/${esc(videoId)}"
-            title="${esc(v.title)}"
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-            allowfullscreen
-            referrerpolicy="strict-origin-when-cross-origin"
-          ></iframe>
-        </div>
-
-        <div style="height:12px"></div>
-
-        <div class="card" style="padding:16px">
-          <div class="h1" style="margin:0 0 8px">${esc(v.title)}</div>
-          <div class="item__meta" style="margin-bottom:10px">
-            <span>${fmtDate(v.published_at)}</span>
-          </div>
-
-          <div class="row" style="justify-content:space-between; flex-wrap:wrap">
-            <a class="row" data-link href="/${esc(v.channel_id)}" style="gap:10px">
-              <div class="avatar" style="width:40px; height:40px; flex:0 0 40px">
-                <img loading="lazy" src="${channelAvatar(channelData?.channel ?? {})}" alt="">
-              </div>
-              <div class="stack" style="gap:2px">
-                <div style="font-weight:700">${esc(v.channel_title ?? "ערוץ")}</div>
-                <div class="muted" style="font-size:12px">${esc(v.channel_id)}</div>
               </div>
             </a>
+          `).join("")}
+        </div>
+      ` : `<div class="muted">אין פלייליסטים (או עדיין לא נטענו).</div>`}
+    `;
+  }
 
-            <a class="btn" href="https://www.youtube.com/watch?v=${esc(videoId)}" target="_blank" rel="noreferrer">פתח ביוטיוב</a>
+  setPage(header + body);
+}
+
+async function pageVideo(video_id){
+  // דורש endpoint api/video (אם כבר יש אצלך – מצוין)
+  setPage(`<div class="muted">טוען סרטון…</div>`);
+  const data = await api(`/api/video?video_id=${encodeURIComponent(video_id)}`);
+  const v = data.video;
+  const rec = data.recommended || [];
+
+  const player = `
+    <iframe class="player"
+      src="https://www.youtube.com/embed/${encodeURIComponent(v.video_id)}?rel=0"
+      title="YouTube video player"
+      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+      allowfullscreen></iframe>
+  `;
+
+  // RTL: main בימין, recommended בשמאל (CSS עושה את זה)
+  setPage(`
+    <div class="watchLayout">
+      <section class="watchMain">
+        ${player}
+        <div class="h1" style="margin-top:10px">${esc(v.title || v.video_id)}</div>
+        <p class="sub">${fmtDate(v.published_at) ? `פורסם: ${esc(fmtDate(v.published_at))}` : ""}</p>
+
+        <div class="hr"></div>
+
+        <div class="avatarRow">
+          ${v.thumbnail_url ? `<img class="avatar" loading="lazy" decoding="async" src="${esc(v.thumbnail_url)}" onerror="this.style.display='none'">`
+                            : `<div class="avatar"></div>`}
+          <div style="min-width:0">
+            <div style="font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+              <a href="/${encodeURIComponent(v.channel_id)}/videos" data-link>${esc(v.channel_title || v.channel_id)}</a>
+            </div>
+            <div class="muted" style="font-size:12px">${esc(v.channel_id)}</div>
+          </div>
+
+          <div style="margin-inline-start:auto" class="btnRow">
+            <a class="btn" target="_blank" rel="noreferrer" href="https://www.youtube.com/watch?v=${encodeURIComponent(v.video_id)}">פתח ביוטיוב</a>
           </div>
         </div>
       </section>
 
       <aside class="watchSide">
-        <div class="card" style="padding:16px">
-          <div class="h2">מוצעים</div>
-          <div class="stack">
-            ${suggested.map(x => `
-              <a class="item" data-link href="/${esc(x.video_id)}" style="padding:10px">
-                <div class="item__media" style="width:160px; flex:0 0 160px">
-                  <div class="thumb">
-                    <img loading="lazy" src="${videoThumb(esc(x.video_id))}" alt="">
-                  </div>
-                </div>
-                <div class="item__body">
-                  <div class="item__title">${esc(x.title)}</div>
-                  <div class="item__meta">
-                    <span>${fmtDate(x.published_at)}</span>
-                  </div>
-                </div>
-              </a>
-            `).join("") || `<div class="muted">אין הצעות כרגע.</div>`}
-          </div>
-        </div>
+        <div style="font-weight:900;margin-bottom:8px">סרטונים מוצעים</div>
+        ${rec.length ? rec.map(r=>`
+          <a class="reco" href="/${encodeURIComponent(r.video_id)}" data-link>
+            <img class="recoThumb" loading="lazy" decoding="async" src="${esc(ytVideoThumb(r.video_id))}">
+            <div style="min-width:0">
+              <div class="recoTitle">${esc(r.title || r.video_id)}</div>
+              <div class="recoMeta">${fmtDate(r.published_at) ? esc(fmtDate(r.published_at)) : ""}</div>
+            </div>
+          </a>
+        `).join("") : `<div class="muted">אין כרגע המלצות מהמסד.</div>`}
       </aside>
     </div>
-  `;
+  `);
 }
 
-async function pagePlaylist(playlistId){
-  setTitle("פלייליסט");
-  app.innerHTML = `
-    <div class="card" style="padding:16px">
-      <div class="h1">פלייליסט</div>
-      <div class="muted">כדי שעמוד פלייליסט יעבוד “כמו יוטיוב”, צריך endpoint שמחזיר פרטים + סרטונים של הפלייליסט.</div>
-      <div class="hr"></div>
-      <div class="muted">מזהה: ${esc(playlistId)}</div>
+async function pagePlaylist(playlist_id){
+  // דורש endpoint api/playlist (אם כבר יש אצלך – מצוין)
+  setPage(`<div class="muted">טוען פלייליסט…</div>`);
+  const data = await api(`/api/playlist?playlist_id=${encodeURIComponent(playlist_id)}`);
+  const p = data.playlist;
+
+  const player = `
+    <iframe class="player"
+      src="https://www.youtube.com/embed/videoseries?list=${encodeURIComponent(p.playlist_id)}&rel=0"
+      title="YouTube playlist player"
+      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+      allowfullscreen></iframe>
+  `;
+
+  setPage(`
+    <div class="h1">${esc(p.title || p.playlist_id)}</div>
+    <p class="sub">${esc(p.playlist_id)}</p>
+
+    <div class="btnRow">
+      <a class="btn" target="_blank" rel="noreferrer" href="https://www.youtube.com/playlist?list=${encodeURIComponent(p.playlist_id)}">פתח ביוטיוב</a>
+      <a class="btn" href="/${encodeURIComponent(p.channel_id)}/playlists" data-link>עוד פלייליסטים בערוץ</a>
     </div>
-  `;
+
+    <div class="hr"></div>
+
+    ${player}
+  `);
 }
 
-async function route(){
-  const url = new URL(location.href);
-  const path = url.pathname.replace(/\/+$/, "") || "/";
-  const params = url.searchParams;
+/* --- Router: כתובות “כמו שביקשת” --- */
+function isVideoId(s){ return /^[a-zA-Z0-9_-]{11}$/.test(s); }
+function isChannelId(s){ return /^UC[a-zA-Z0-9_-]{20,}$/.test(s); }
+function isPlaylistId(s){ return /^PL[a-zA-Z0-9_-]{10,}$/.test(s); }
 
-  try {
-    if (path === "/") return await pageHome();
-    if (path === "/channels") return await pageChannels();
-    if (path === "/playlists") return await pagePlaylists();
-    if (path === "/search") return await pageSearch(params);
+async function render(){
+  const { parts, qs } = route();
 
-    // מזהה דינמי: /UC... או /PL... או /videoId
-    const id = path.slice(1);
-    if (!id) return renderNotFound();
+  // reserved
+  if(parts.length === 0) return pageHome();
+  if(parts[0] === "channels") return pageChannels();
+  if(parts[0] === "playlists") return pagePlaylists();
+  if(parts[0] === "search") return pageSearch((qs.get("q")||"").trim());
 
-    if (isChannelId(id)) return await pageChannel(id, params);
-    if (isPlaylistId(id)) return await pagePlaylist(id);
-    if (looksLikeVideoId(id)) return await pageVideo(id);
-
-    return renderNotFound();
-  } catch (e) {
-    renderError(e?.message ?? String(e));
+  // Direct IDs:
+  // /UC.../videos  | /UC.../playlists
+  if(parts.length >= 1 && isChannelId(parts[0])){
+    const tab = parts[1] || "videos";
+    return pageChannel(parts[0], tab === "playlists" ? "playlists" : "videos");
   }
+
+  // /PL...
+  if(parts.length === 1 && isPlaylistId(parts[0])){
+    return pagePlaylist(parts[0]);
+  }
+
+  // /VIDEOID
+  if(parts.length === 1 && isVideoId(parts[0])){
+    return pageVideo(parts[0]);
+  }
+
+  setPage(`<div class="h1">לא נמצא</div><p class="sub"><a href="/" data-link>חזרה לבית</a></p>`);
 }
 
-route();
+/* init */
+hookLinks();
+headerSearch();
+render().catch(showErr);
