@@ -1,8 +1,10 @@
 export async function onRequest({ env }) {
   try {
-    await env.DB.prepare("SELECT 1").first();
-    return Response.json({ ok: true, db: true });
+    const r = await env.DB.prepare("SELECT 1 AS ok").first();
+    return Response.json({ ok: true, db: !!r?.ok }, {
+      headers: { "cache-control": "no-store" }
+    });
   } catch (e) {
-    return Response.json({ ok: false, db: false, error: String(e) }, { status: 500 });
+    return Response.json({ ok: false, db: false, error: String(e?.message || e) }, { status: 500 });
   }
 }
