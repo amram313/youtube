@@ -111,6 +111,11 @@ export async function onRequest({ env, request }) {
             status = 'active',
             lease_expires_at = COALESCE(excluded.lease_expires_at, subscriptions.lease_expires_at),
             last_error = NULL
+          WHERE
+            subscriptions.channel_int IS NOT excluded.channel_int OR
+            subscriptions.status IS NOT 'active' OR
+            COALESCE(excluded.lease_expires_at, subscriptions.lease_expires_at) IS NOT subscriptions.lease_expires_at OR
+            subscriptions.last_error IS NOT NULL
         `).bind(topic, ch.id, lease_expires_at).run();
       }
     }
