@@ -4,32 +4,41 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>YouTube Catalog</title>
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="/" data-link>
-      <span class="logoDot"></span>
-      <span>YouTube Catalog</span>
-    </a>
+    <div class="topbar__inner">
+      <a class="brand" href="/" data-link>
+        <span class="brand__dot"></span>
+        <span class="brand__txt">YouTube Catalog</span>
+      </a>
 
-    <form class="search" id="searchForm" role="search">
-      <input id="searchInput" placeholder="חיפוש בכותרות…" autocomplete="off" />
-      <button type="submit">חפש</button>
-    </form>
+      <form class="search" id="searchForm">
+        <input id="q" class="search__input" type="search" placeholder="חיפוש בכותרות…" autocomplete="off" />
+        <button class="search__btn" type="submit">חפש</button>
+      </form>
 
-    <nav class="nav">
-      <a class="navLink" href="/" data-link>בית</a>
-      <a class="navLink" href="/channels" data-link>ערוצים</a>
-      <a class="navLink" href="/playlists" data-link>פלייליסטים</a>
-      <a class="navLink" href="/admin.html">ניהול</a>
-    </nav>
+      <nav class="nav">
+        <a href="/" data-link>בית</a>
+        <a href="/channels" data-link>ערוצים</a>
+        <a href="/playlists" data-link>פלייליסטים</a>
+        <a href="/admin.html">ניהול</a>
+      </nav>
+    </div>
   </header>
 
   <main class="shell">
-    <div id="page" class="page"></div>
+    <div id="app" class="app">
+      <!-- injected -->
+    </div>
   </main>
 
-  <script src="/app.js" defer></script>
+  <footer class="footer">
+    <span>© YouTube Catalog</span>
+    <a href="/api/health" target="_blank" rel="noreferrer">health</a>
+  </footer>
+
+  <script type="module" src="/app.js"></script>
 </body>
 </html>
