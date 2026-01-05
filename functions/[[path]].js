@@ -56,27 +56,23 @@ async function buildOgMeta({ url, env }) {
   if (mVideo) {
     const id = mVideo[1];
 
-    // שליפה מה-D1: videos(video_id, title, channel_i)
-    // + JOIN כדי להביא גם שם ערוץ (אופציונלי לתיאור)
+    // שדרוג: לקחת כותרת אמיתית מה-D1 (טבלת videos)
     const row = await firstRow(env.DB, `
-      SELECT v.title AS video_title, c.title AS channel_title
-      FROM videos v
-      LEFT JOIN channels c ON c.id = v.channel_i
-      WHERE v.video_id = ?
+      SELECT title
+      FROM videos
+      WHERE video_id = ?
       LIMIT 1
     `, [id]);
-
-    const title = row?.video_title || "צפייה בסרטון";
-    const description = row?.channel_title ? `ערוץ: ${row.channel_title}` : "צפה בסרטון";
 
     return {
       type: "video.other",
       url: url.toString(),
-      title,
-      description,
+      title: row?.title || "צפייה בסרטון",
+      description: "צפה בסרטון",
       image: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
     };
   }
+
 
 
   // 2) פלייליסט: /PL....
