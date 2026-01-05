@@ -123,6 +123,28 @@ async function subscribeWebSub({ env, request, channel_id, channel_int }) {
   params.set("hub.callback", callback);
   params.set("hub.topic", topic);
   params.set("hub.verify", "async");
+
+  // חשוב: מגן מזיוף של בקשות אימות GET
+  if (!env.WEBSUB_VERIFY_TOKEN) {
+    const last_error = "missing WEBSUB_VERIFY_TOKEN";
+
+    await env.DB.prepare(`
+      INSERT INTO subscriptions(topic_url, channel_int, status, last_subscribed_at, last_error)
+      VALUES(?, ?, 'pending', ?, ?)
+      ON CONFLICT(topic_url) DO UPDATE SET
+        channel_int = excluded.channel_int,
+        status = CASE
+          WHEN subscriptions.status='active' THEN 'active'
+          ELSE 'pending'
+        END,
+        last_subscribed_at = excluded.last_subscribed_at,
+        last_error = excluded.last_error
+    `).bind(topic, channel_int, t, last_error).run();
+
+    return { ok: false, skipped: false, reason: last_error, topic, hub_status: null, last_error };
+  }
+  params.set("hub.verify_token", env.WEBSUB_VERIFY_TOKEN);
+
   if (env.WEBSUB_SECRET) params.set("hub.secret", env.WEBSUB_SECRET);
 
   const res = await fetch(hub, {
