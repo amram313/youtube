@@ -51,12 +51,11 @@ export async function onRequest(context) {
 async function buildOgMeta({ url, env }) {
   const p = url.pathname;
 
-  // 1) וידאו: /<11chars>
+   // 1) וידאו: /<11chars>
   const mVideo = p.match(/^\/([A-Za-z0-9_-]{11})$/);
   if (mVideo) {
     const id = mVideo[1];
 
-    // שדרוג: לקחת כותרת אמיתית מה-D1 (טבלת videos)
     const row = await firstRow(env.DB, `
       SELECT title
       FROM videos
@@ -64,14 +63,17 @@ async function buildOgMeta({ url, env }) {
       LIMIT 1
     `, [id]);
 
+    const title = row?.title || "צפייה בסרטון";
+
     return {
       type: "video.other",
       url: url.toString(),
-      title: row?.title || "צפייה בסרטון",
-      description: "צפה בסרטון",
+      title: title,
+      description: title,
       image: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
     };
   }
+
 
 
 
