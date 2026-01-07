@@ -160,13 +160,19 @@ export async function onRequest({ env, request }){
   // =========================
   // התראות POST מה-Hub
   // =========================
-  if(request.method === "POST"){
+  if (request.method === "POST") {
     const bodyBuf = await request.arrayBuffer();
     const bodyU8 = new Uint8Array(bodyBuf);
 
     const topic = (request.headers.get("x-hub-topic") || "").trim();
 
-    if(!env.WEBSUB_SECRET){
+    console.log("websub POST hit", {
+      hasSig: !!request.headers.get("x-hub-signature"),
+      topic: topic.slice(0, 120),
+      len: request.headers.get("content-length") || null
+    });
+
+    if (!env.WEBSUB_SECRET) {
       console.log("websub POST missing WEBSUB_SECRET");
       return new Response("missing WEBSUB_SECRET", { status: 500 });
     }
