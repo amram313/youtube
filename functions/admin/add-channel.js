@@ -23,94 +23,88 @@ function extractVideoIdFromThumbUrl(url) {
   return m ? m[1] : null;
 }
 
-/** שומר אירוע "צ'אנל נוסף" */
-async function logAddChannel({ env, channel_int, channel_id }) {
-  const t = nowSec();
-  await env.DB.prepare(`
-    INSERT INTO logs (ts, kind, channel_int, channel_id, data)
-    VALUES (?, 'add-channel', ?, ?, NULL)
-  `).bind(t, channel_int, channel_id).run();
+function pickPlaylistThumbVideoId(thumbnails) {
+  if (!thumbnails) return null;
+  const urls = [
+    thumbnails.medium?.url,
+    thumbnails.default?.url,
+    thumbnails.high?.url,
+    thumbnails.maxres?.url,
+  ].filter(Boolean);
+
+  for (const u of urls) {
+    const id = extractVideoIdFromThumbUrl(u);
+    if (id) return id;
+  }
+  return null;
 }
 
-async function upsertChannel({ env, channel_id, title, uploads_playlist_id }) {
-  const t = nowSec();
-  const out = await env.DB.prepare(`
-    INSERT INTO channels (channel_id, title, uploads_playlist_id, created_at)
-    VALUES (?, ?, ?, ?)
-    ON CONFLICT(channel_id) DO UPDATE SET
-      title = excluded.title,
-      uploads_playlist_id = excluded.uploads_playlist_id
-    RETURNING channel_int
-  `).bind(channel_id, title || null, uploads_playlist_id || null, t).first();
+async function importPlaylistsForChannel({ env, channel_int, channel_id, max_pages = 10 }) {
+  if (!env.YT_API_KEY) return { ok: false, reason: "missing YT_API_KEY", imported: 0 };
 
-  return out?.channel_int;
-}
-
-async function importUploadsPlaylist({ env, channel_int, playlist_id }) {
-  if (!playlist_id) return { ok: false, imported: 0 };
-
-  let imported = 0;
   let pageToken = null;
-  const API_KEY = env.YT_API_KEY;
+  let imported = 0;
 
-  if (!API_KEY) return { ok: false, imported: 0, error: "missing YT_API_KEY" };
+  for (let page = 0; page < max_pages; page++) {
+    const url =
+      `https://www.googleapis.com/youtube/v3/playlists` +
+      `?part=snippet,contentDetails&maxResults=50` +
+      `&channelId=${encodeURIComponent(channel_id)}` +
+      (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ``) +
+      `&key=${encodeURIComponent(env.YT_API_KEY)}`;
 
-  for (let i = 0; i < 50; i++) { // בטיחות
-    const url = new URL("https://www.googleapis.com/youtube/v3/playlistItems");
-    url.searchParams.set("part", "snippet,contentDetails");
-    url.searchParams.set("playlistId", playlist_id);
-    url.searchParams.set("maxResults", "50");
-    url.searchParams.set("key", API_KEY);
-    if (pageToken) url.searchParams.set("pageToken", pageToken);
+    const data = await ytJson(url);
+    const items = data?.items || [];
+    if (!items.length && !data?.nextPageToken) break;
 
-    const data = await ytJson(url.toString());
-    const items = data.items || [];
+    const stmts = [];
+    const now = nowSec();
 
     for (const it of items) {
-      const sn = it.snippet || {};
-      const cd = it.contentDetails || {};
+      const playlist_id = it?.id || null;
+      if (!playlist_id) continue;
 
-      const video_id = cd.videoId || sn?.resourceId?.videoId || null;
-      if (!video_id) continue;
+      const title = (it?.snippet?.title || "").slice(0, 200) || null;
+      const published_at = toUnixSeconds(it?.snippet?.publishedAt || null);
+      const item_count = Number.isFinite(it?.contentDetails?.itemCount)
+        ? it.contentDetails.itemCount
+        : null;
 
-      const published_at = toUnixSeconds(cd.videoPublishedAt || sn.publishedAt) || null;
-      const title = sn.title || null;
-      const channel_title = sn.channelTitle || null;
-      const description = sn.description || null;
+      // ✅ רק מזהה (לא URL)
+      const thumb_video_id = pickPlaylistThumbVideoId(it?.snippet?.thumbnails);
 
-      const thumb = sn.thumbnails?.high?.url || sn.thumbnails?.medium?.url || sn.thumbnails?.default?.url || null;
-      const thumb_video_id = extractVideoIdFromThumbUrl(thumb);
-
-      await env.DB.prepare(`
-        INSERT INTO videos (channel_int, video_id, published_at, title, channel_title, description, thumb_video_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(channel_int, video_id) DO UPDATE SET
-          published_at = COALESCE(excluded.published_at, videos.published_at),
-          title = COALESCE(excluded.title, videos.title),
-          channel_title = COALESCE(excluded.channel_title, videos.channel_title),
-          description = COALESCE(excluded.description, videos.description),
-          thumb_video_id = COALESCE(excluded.thumb_video_id, videos.thumb_video_id)
-      `).bind(channel_int, video_id, published_at, title, channel_title, description, thumb_video_id).run();
+      stmts.push(
+        env.DB.prepare(`
+          INSERT INTO playlists(playlist_id, channel_int, title, thumb_video_id, published_at, item_count, updated_at)
+          VALUES(?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(playlist_id) DO UPDATE SET
+            channel_int    = excluded.channel_int,
+            title          = COALESCE(excluded.title, playlists.title),
+            thumb_video_id = COALESCE(excluded.thumb_video_id, playlists.thumb_video_id),
+            published_at   = COALESCE(excluded.published_at, playlists.published_at),
+            item_count     = COALESCE(excluded.item_count, playlists.item_count),
+            updated_at     = excluded.updated_at
+        `).bind(playlist_id, channel_int, title, thumb_video_id, published_at, item_count, now)
+      );
 
       imported++;
     }
 
-    pageToken = data.nextPageToken || null;
+    if (stmts.length) await env.DB.batch(stmts);
+
+    pageToken = data?.nextPageToken || null;
     if (!pageToken) break;
   }
 
   return { ok: true, imported };
 }
 
+/** subscribe WebSub בצורה אידמפוטנטית (לא דורס active, ולא שולח שוב אם יש זמן) */
 async function subscribeWebSub({ env, request, channel_id, channel_int }) {
   const t = nowSec();
   const origin = new URL(request.url).origin;
   const callback = `${origin}/websub/youtube`;
-
-  // חשוב: ביוטיוב ה-topic ה"קנוני" הוא מה שמופיע ב-<link rel="self"> בפיד
-  // ולכן משתמשים ב- /xml/feeds ולא ב- /feeds
   const topic = `https://www.youtube.com/xml/feeds/videos.xml?channel_id=${encodeURIComponent(channel_id)}`;
-
   const hub = "https://pubsubhubbub.appspot.com/subscribe";
 
   const existing = await env.DB.prepare(`
@@ -126,32 +120,55 @@ async function subscribeWebSub({ env, request, channel_id, channel_int }) {
 
   const params = new URLSearchParams();
   params.set("hub.mode", "subscribe");
-  params.set("hub.topic", topic);
   params.set("hub.callback", callback);
+  params.set("hub.topic", topic);
   params.set("hub.verify", "async");
-  params.set("hub.verify_token", env.WEBSUB_VERIFY_TOKEN || "");
-  params.set("hub.lease_seconds", String(env.WEBSUB_LEASE_SECONDS || 432000));
 
-  const r = await fetch(hub, {
+  // חשוב: מגן מזיוף של בקשות אימות GET
+  if (!env.WEBSUB_VERIFY_TOKEN) {
+    const last_error = "missing WEBSUB_VERIFY_TOKEN";
+
+    await env.DB.prepare(`
+      INSERT INTO subscriptions(topic_url, channel_int, status, last_subscribed_at, last_error)
+      VALUES(?, ?, 'pending', ?, ?)
+      ON CONFLICT(topic_url) DO UPDATE SET
+        channel_int = excluded.channel_int,
+        status = CASE
+          WHEN subscriptions.status='active' THEN 'active'
+          ELSE 'pending'
+        END,
+        last_subscribed_at = excluded.last_subscribed_at,
+        last_error = excluded.last_error
+    `).bind(topic, channel_int, t, last_error).run();
+
+    return { ok: false, skipped: false, reason: last_error, topic, hub_status: null, last_error };
+  }
+  params.set("hub.verify_token", env.WEBSUB_VERIFY_TOKEN);
+
+  if (env.WEBSUB_SECRET) params.set("hub.secret", env.WEBSUB_SECRET);
+
+  const res = await fetch(hub, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: params.toString()
+    body: params.toString(),
   });
 
-  const last_error = r.ok ? null : `hub ${r.status}: ${(await r.text()).slice(0, 200)}`;
+  const last_error = res.ok ? null : `hub subscribe failed: ${res.status}`;
 
-  // נשמור/נעדכן סטטוס "pending" מיד עם הבקשה
   await env.DB.prepare(`
-    INSERT INTO subscriptions (topic_url, channel_int, status, last_subscribed_at, last_error)
-    VALUES (?, ?, 'pending', ?, ?)
+    INSERT INTO subscriptions(topic_url, channel_int, status, last_subscribed_at, last_error)
+    VALUES(?, ?, 'pending', ?, ?)
     ON CONFLICT(topic_url) DO UPDATE SET
       channel_int = excluded.channel_int,
-      status = excluded.status,
+      status = CASE
+        WHEN subscriptions.status='active' THEN 'active'
+        ELSE 'pending'
+      END,
       last_subscribed_at = excluded.last_subscribed_at,
       last_error = excluded.last_error
   `).bind(topic, channel_int, t, last_error).run();
 
-  return { ok: r.ok, skipped: false, topic, hub_status: r.status, last_error };
+  return { ok: res.ok, skipped: false, topic, hub_status: res.status, last_error };
 }
 
 export async function onRequest({ env, request }) {
@@ -162,46 +179,71 @@ export async function onRequest({ env, request }) {
 
   const body = await request.json().catch(() => ({}));
   const channel_id = (body.channel_id || "").trim();
+  const playlists_pages = Math.min(Math.max(parseInt(body.playlists_pages || "10", 10), 1), 30);
 
-  if (!channel_id) return Response.json({ ok: false, error: "missing channel_id" }, { status: 400 });
+  if (!channel_id) return new Response("missing channel_id", { status: 400 });
 
-  const apiKey = env.YT_API_KEY;
-  if (!apiKey) return Response.json({ ok: false, error: "missing YT_API_KEY" }, { status: 500 });
+  const t = nowSec();
 
-  const url = new URL("https://www.googleapis.com/youtube/v3/channels");
-  url.searchParams.set("part", "snippet,contentDetails");
-  url.searchParams.set("id", channel_id);
-  url.searchParams.set("key", apiKey);
+  // מושכים title/thumb/uploads לערוץ
+  let title = null, thumb = null, uploads = null;
 
-  const data = await ytJson(url.toString());
-  const ch = (data.items || [])[0];
-  if (!ch) return Response.json({ ok: false, error: "channel not found" }, { status: 404 });
+  if (env.YT_API_KEY) {
+    const data = await ytJson(
+      `https://www.googleapis.com/youtube/v3/channels?part=snippet,contentDetails&id=${encodeURIComponent(channel_id)}&key=${encodeURIComponent(env.YT_API_KEY)}`
+    );
+    const item = data?.items?.[0];
+    title = item?.snippet?.title || null;
+    thumb =
+      item?.snippet?.thumbnails?.default?.url ||
+      item?.snippet?.thumbnails?.medium?.url ||
+      item?.snippet?.thumbnails?.high?.url ||
+      null;
+    uploads = item?.contentDetails?.relatedPlaylists?.uploads || null;
+  }
 
-  const title = ch.snippet?.title || null;
-  const uploads_playlist_id = ch.contentDetails?.relatedPlaylists?.uploads || null;
+  // upsert channels
+  await env.DB.prepare(`
+    INSERT INTO channels(channel_id, title, thumbnail_url, is_active, created_at, updated_at)
+    VALUES(?, ?, ?, 1, ?, ?)
+    ON CONFLICT(channel_id) DO UPDATE SET
+      title = COALESCE(excluded.title, channels.title),
+      thumbnail_url = COALESCE(excluded.thumbnail_url, channels.thumbnail_url),
+      is_active = 1,
+      updated_at = excluded.updated_at
+  `).bind(channel_id, title, thumb, t, t).run();
 
-  const channel_int = await upsertChannel({ env, channel_id, title, uploads_playlist_id });
-  if (!channel_int) return Response.json({ ok: false, error: "failed to upsert channel" }, { status: 500 });
+  const ch = await env.DB.prepare(`SELECT id FROM channels WHERE channel_id=?`).bind(channel_id).first();
+  if (!ch) return new Response("failed to load channel row", { status: 500 });
+  const channel_int = ch.id;
 
-  await logAddChannel({ env, channel_int, channel_id });
+  // backfill state
+  await env.DB.prepare(`
+    INSERT INTO channel_backfill(channel_int, uploads_playlist_id, next_page_token, done, imported_count, updated_at)
+    VALUES(?, ?, NULL, 0, 0, ?)
+    ON CONFLICT(channel_int) DO UPDATE SET
+      uploads_playlist_id = COALESCE(excluded.uploads_playlist_id, channel_backfill.uploads_playlist_id),
+      updated_at = excluded.updated_at
+  `).bind(channel_int, uploads, t).run();
 
+  // subscribe
   const websub = await subscribeWebSub({ env, request, channel_id, channel_int });
-  const playlists = await importUploadsPlaylist({ env, channel_int, playlist_id: uploads_playlist_id });
+
+  // playlists import (רק מזהה לתמונה)
+  const playlists = await importPlaylistsForChannel({
+    env,
+    channel_int,
+    channel_id,
+    max_pages: playlists_pages
+  });
 
   return Response.json({
     ok: true,
     channel_id,
     channel_int,
     title,
-    uploads_playlist_id,
-    websub: {
-      ok: !!websub.ok,
-      skipped: !!websub.skipped,
-      reason: websub.reason || null,
-      topic: websub.topic,
-      hub_status: websub.hub_status,
-      last_error: websub.last_error || null
-    },
+    uploads_playlist_id: uploads,
+    websub,
     playlists
   });
 }
