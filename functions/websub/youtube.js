@@ -101,8 +101,8 @@ export async function onRequest({ env, request }) {
   // =========================
   if (request.method === "GET") {
     const mode = (url.searchParams.get("hub.mode") || "").trim();
-    const topicHdrRaw = (request.headers.get("x-hub-topic") || "").trim();
-    const topicHdr = canonicalTopicUrl(topicHdrRaw);
+    const topicRaw = (url.searchParams.get("hub.topic") || "").trim();
+    const topic = canonicalTopicUrl(topicRaw);
     const challenge = (url.searchParams.get("hub.challenge") || "").trim();
     const verifyToken = (url.searchParams.get("hub.verify_token") || "").trim();
     const leaseSec = parseInt(url.searchParams.get("hub.lease_seconds") || "0", 10) || 0;
