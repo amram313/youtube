@@ -4,6 +4,17 @@ function nowSec() {
   return Math.floor(Date.now() / 1000);
 }
 
+function canonicalTopicUrl(topic) {
+  const t = (topic || "").trim();
+  if (!t) return "";
+
+  // חשוב: ביוטיוב ה-topic ה"קנוני" הוא /xml/feeds (זה מה שמופיע ב-<link rel="self">)
+  // לפעמים מגיע אלינו /feeds בלי /xml, אז מנרמלים כדי שה-DB יתאים בדיוק.
+  return t
+    .replace("https://www.youtube.com/feeds/videos.xml", "https://www.youtube.com/xml/feeds/videos.xml")
+    .replace("https://youtube.com/feeds/videos.xml", "https://www.youtube.com/xml/feeds/videos.xml");
+}
+
 function toUnixSeconds(iso) {
   const ms = Date.parse(iso || "");
   return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
@@ -31,237 +42,207 @@ function extractEntries(xml) {
   while ((m = entryRe.exec(xml))) {
     const e = m[1];
 
-    const videoId = matchText(e, /<yt:videoId>([^<]+)<\/yt:videoId>/);
-    if (!videoId) continue;
+    const video_id =
+      matchText(e, /<yt:videoId[^>]*>([^<]+)<\/yt:videoId>/) ||
+      matchText(e, /<id[^>]*>yt:video:([^<]+)<\/id>/);
 
-    const channelId = matchText(e, /<yt:channelId>([^<]+)<\/yt:channelId>/) || null;
-    const title = matchText(e, /<title>([^<]+)<\/title>/) || "";
-    const published = matchText(e, /<published>([^<]+)<\/published>/);
+    const published_at = toUnixSeconds(matchText(e, /<published[^>]*>([^<]+)<\/published>/));
+    const title = matchText(e, /<title[^>]*>([^<]+)<\/title>/);
+
+    // תיאור: יוטיוב לפעמים שם כ: <media:group><media:description>...</media:description>
+    const description =
+      matchText(e, /<media:description[^>]*>([\s\S]*?)<\/media:description>/) ||
+      matchText(e, /<summary[^>]*>([\s\S]*?)<\/summary>/);
+
+    // thumbnail: <media:thumbnail url="..."/>
+    const thumb = matchText(e, /<media:thumbnail[^>]*url="([^"]+)"/);
 
     out.push({
-      videoId,
-      channelId,
-      title,
-      published_at: toUnixSeconds(published || null)
+      video_id: video_id || null,
+      published_at: published_at || null,
+      title: title || null,
+      description: description || null,
+      thumb: thumb || null
     });
   }
 
   return out;
 }
 
-function channelIdFromTopic(topic) {
-  const t = (topic || "").trim();
-  const m = t.match(/[?&]channel_id=([^&]+)/);
-  return m ? decodeURIComponent(m[1]) : null;
+async function sha1hex(input) {
+  const buf = typeof input === "string" ? new TextEncoder().encode(input) : input;
+  const hash = await crypto.subtle.digest("SHA-1", buf);
+  const u8 = new Uint8Array(hash);
+  return [...u8].map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
-async function sha1HmacHex(secret, bodyU8) {
-  const enc = new TextEncoder();
+async function hmacSha1Hex(secret, dataU8) {
   const key = await crypto.subtle.importKey(
     "raw",
-    enc.encode(secret),
+    new TextEncoder().encode(secret),
     { name: "HMAC", hash: "SHA-1" },
     false,
     ["sign"]
   );
-
-  const sig = await crypto.subtle.sign("HMAC", key, bodyU8);
-  const b = new Uint8Array(sig);
-
-  let hex = "";
-  for (let i = 0; i < b.length; i++) hex += b[i].toString(16).padStart(2, "0");
-  return hex;
+  const sig = await crypto.subtle.sign("HMAC", key, dataU8);
+  const u8 = new Uint8Array(sig);
+  return [...u8].map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
-function json(obj, status = 200) {
-  return new Response(JSON.stringify(obj), {
-    status,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "no-store"
+async function storeVideos({ env, channel_int, entries }) {
+  let upserted = 0;
+
+  for (const it of entries) {
+    if (!it.video_id) continue;
+
+    // ננרמל thumb ל-VIDEO_ID אם זה ytimg
+    let thumb_video_id = null;
+    if (it.thumb) {
+      const m = it.thumb.match(/\/vi(?:_webp)?\/([a-zA-Z0-9_-]{11})\//);
+      thumb_video_id = m ? m[1] : null;
     }
-  });
+
+    await env.DB.prepare(`
+      INSERT INTO videos (channel_int, video_id, published_at, title, description, thumb_video_id)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(channel_int, video_id) DO UPDATE SET
+        published_at = COALESCE(excluded.published_at, videos.published_at),
+        title = COALESCE(excluded.title, videos.title),
+        description = COALESCE(excluded.description, videos.description),
+        thumb_video_id = COALESCE(excluded.thumb_video_id, videos.thumb_video_id)
+    `).bind(
+      channel_int,
+      it.video_id,
+      it.published_at,
+      it.title,
+      it.description,
+      thumb_video_id
+    ).run();
+
+    upserted++;
+  }
+
+  return upserted;
 }
 
 export async function onRequest({ env, request }) {
   const url = new URL(request.url);
-  const debug = url.searchParams.get("debug") === "1";
 
-  // =========================
-  // אימות GET מה-Hub (challenge)
-  // =========================
+  // GET - verification
   if (request.method === "GET") {
     const mode = (url.searchParams.get("hub.mode") || "").trim();
-    const topic = (url.searchParams.get("hub.topic") || "").trim();
+    const topicRaw = (url.searchParams.get("hub.topic") || "").trim();
+    const topic = canonicalTopicUrl(topicRaw);
     const challenge = (url.searchParams.get("hub.challenge") || "").trim();
     const verifyToken = (url.searchParams.get("hub.verify_token") || "").trim();
     const leaseSec = parseInt(url.searchParams.get("hub.lease_seconds") || "0", 10) || 0;
 
     if (!challenge) return new Response("missing hub.challenge", { status: 400 });
+    if (!topic) return new Response("missing hub.topic", { status: 400 });
 
-    if (!env.WEBSUB_VERIFY_TOKEN) {
-      console.log("websub GET missing WEBSUB_VERIFY_TOKEN");
-      return new Response("missing WEBSUB_VERIFY_TOKEN", { status: 500 });
+    if (!env.WEBSUB_VERIFY_TOKEN || verifyToken !== env.WEBSUB_VERIFY_TOKEN) {
+      console.log("websub GET bad token", { verifyToken });
+      return new Response("bad token", { status: 403 });
     }
 
-    if (verifyToken !== env.WEBSUB_VERIFY_TOKEN) {
-      console.log("websub GET bad verify_token");
-      return new Response("bad verify_token", { status: 403 });
+    // הגנה: לא לאשר אימות אם לא ביקשנו subscribe לאחרונה
+    const row = topic ? await env.DB.prepare(`
+      SELECT last_subscribed_at
+      FROM subscriptions
+      WHERE topic_url=?
+    `).bind(topic).first() : null;
+
+    const t = nowSec();
+    const MAX_AGE = 15 * 60; // 15 דקות
+    if (!row?.last_subscribed_at || row.last_subscribed_at < (t - MAX_AGE)) {
+      console.log("websub GET stale verification");
+      return new Response("stale verification", { status: 403 });
     }
 
-    const now = nowSec();
-    const leaseExp = leaseSec ? (now + leaseSec) : null;
+    if (topic && leaseSec > 0) {
+      const expires = t + leaseSec;
 
-    // ✅ אצלך subscriptions.channel_int NOT NULL
-    // לכן חייבים למצוא channel_int לפני INSERT/UPSERT
-    const channelId = channelIdFromTopic(topic);
-    const ch = channelId
-      ? await env.DB.prepare(`SELECT id FROM channels WHERE channel_id=? LIMIT 1`).bind(channelId).first()
-      : null;
-
-    const channelInt = ch?.id ?? null;
-
-    // אם לא מצאנו channel_int – לא ננסה INSERT כדי לא לקרוס,
-    // אבל עדיין נחזיר challenge כדי שה-Hub יוכל להשלים verification.
-    if (topic && channelInt) {
       await env.DB.prepare(`
-        INSERT INTO subscriptions(topic_url, channel_int, status, lease_expires_at, last_subscribed_at, last_error)
-        VALUES(?, ?, 'active', ?, ?, NULL)
-        ON CONFLICT(topic_url) DO UPDATE SET
-          channel_int        = excluded.channel_int,
-          status             = 'active',
-          lease_expires_at   = excluded.lease_expires_at,
-          last_subscribed_at = excluded.last_subscribed_at,
-          last_error         = NULL
-      `).bind(topic, channelInt, leaseExp, now).run();
-    } else {
-      console.log("websub GET verified but channel_int missing", {
-        mode,
-        topic: topic ? topic.slice(0, 140) : null,
-        channelId,
-        channelInt
-      });
+        UPDATE subscriptions
+        SET status='active',
+            lease_expires_at=?,
+            last_subscribed_at=?,
+            last_error=NULL
+        WHERE topic_url=?
+      `).bind(expires, t, topic).run();
     }
 
-    console.log("websub GET verified", {
-      topic: topic ? topic.slice(0, 140) : null,
-      channelId,
-      channelInt,
-      leaseSec
-    });
-
-    return new Response(challenge, {
-      status: 200,
-      headers: {
-        "content-type": "text/plain; charset=utf-8",
-        "cache-control": "no-store"
-      }
-    });
+    console.log("websub GET verified", { mode, topic, leaseSec });
+    return new Response(challenge, { status: 200, headers: { "content-type": "text/plain" } });
   }
 
-  // =========================
-  // התראות POST מה-Hub (notify)
-  // =========================
+  // POST - notifications
   if (request.method === "POST") {
     const bodyBuf = await request.arrayBuffer();
     const bodyU8 = new Uint8Array(bodyBuf);
 
-    const topicHdr = (request.headers.get("x-hub-topic") || "").trim();
+    const topicHdrRaw = (request.headers.get("x-hub-topic") || "").trim();
+    const topicHdr = canonicalTopicUrl(topicHdrRaw);
     const sigHdr = (request.headers.get("x-hub-signature") || "").trim().toLowerCase();
 
     console.log("websub POST hit", {
       hasSig: !!sigHdr,
-      topic: topicHdr ? topicHdr.slice(0, 140) : null,
-      len: bodyU8.byteLength
+      topic: topicHdr ? topicHdr.slice(0, 120) : null,
+      bytes: bodyU8.length
     });
 
-    if (!env.WEBSUB_SECRET) {
-      console.log("websub POST missing WEBSUB_SECRET");
-      return new Response("missing WEBSUB_SECRET", { status: 500 });
-    }
+    // בדיקת חתימה (אם מוגדרת)
+    if (env.WEBSUB_SECRET) {
+      // header format: "sha1=..."
+      const m = sigHdr.match(/^sha1=([0-9a-f]{40})$/);
+      if (!m) {
+        console.log("websub POST missing/invalid signature header");
+        return new Response("bad signature header", { status: 403 });
+      }
 
-    const m = sigHdr.match(/^sha1=([0-9a-f]{40})$/i);
-    if (!m) return new Response("bad signature", { status: 403 });
-
-    const got = m[1].toLowerCase();
-    const exp = await sha1HmacHex(env.WEBSUB_SECRET, bodyU8);
-    if (got !== exp) return new Response("bad signature", { status: 403 });
-
-    const xml = new TextDecoder("utf-8").decode(bodyU8);
-    const entries = extractEntries(xml);
-
-    if (!entries.length) {
-      if (debug) return json({ ok: true, entries: 0, saved: 0 });
-      return new Response(null, { status: 204 });
-    }
-
-    // 1) מיפוי לפי subscriptions.topic_url (אם קיים)
-    let channelInt = null;
-
-    if (topicHdr) {
-      const sub = await env.DB.prepare(`
-        SELECT channel_int
-        FROM subscriptions
-        WHERE topic_url=?
-        LIMIT 1
-      `).bind(topicHdr).first();
-
-      channelInt = sub?.channel_int ?? null;
-    }
-
-    // 2) fallback לפי channel_id מתוך topic או XML → channels.id
-    if (!channelInt) {
-      const channelId = channelIdFromTopic(topicHdr) || (entries.find(e => e.channelId)?.channelId || null);
-
-      if (channelId) {
-        const ch = await env.DB.prepare(`
-          SELECT id
-          FROM channels
-          WHERE channel_id=?
-          LIMIT 1
-        `).bind(channelId).first();
-
-        channelInt = ch?.id ?? null;
+      const expected = await hmacSha1Hex(env.WEBSUB_SECRET, bodyU8);
+      if (expected !== m[1]) {
+        console.log("websub POST signature mismatch");
+        return new Response("signature mismatch", { status: 403 });
       }
     }
 
-    if (!channelInt) {
-      console.log("websub POST no channel_int (skip)", {
-        topic: topicHdr ? topicHdr.slice(0, 140) : null,
-        entries: entries.length
-      });
-
-      if (debug) return json({ ok: false, reason: "no channel_int", entries: entries.length, topic: topicHdr || null });
-      return new Response(null, { status: 204 });
+    if (!topicHdr) {
+      console.log("websub POST missing x-hub-topic");
+      return new Response("missing topic", { status: 400 });
     }
 
-    const now = nowSec();
-    const stmts = [];
+    const sub = await env.DB.prepare(`
+      SELECT channel_int
+      FROM subscriptions
+      WHERE topic_url=?
+    `).bind(topicHdr).first();
 
-    for (const e of entries) {
-      const title = (e.title || "").slice(0, 200);
-      stmts.push(env.DB.prepare(`
-        INSERT INTO videos(video_id, channel_int, title, published_at, updated_at)
-        VALUES(?, ?, ?, ?, ?)
-        ON CONFLICT(video_id) DO UPDATE SET
-          channel_int   = excluded.channel_int,
-          title         = excluded.title,
-          published_at  = COALESCE(excluded.published_at, videos.published_at),
-          updated_at    = excluded.updated_at
-        WHERE
-          videos.channel_int IS NOT excluded.channel_int
-          OR videos.title IS NOT excluded.title
-          OR (excluded.published_at IS NOT NULL AND COALESCE(videos.published_at,0) != COALESCE(excluded.published_at,0))
-      `).bind(e.videoId, channelInt, title, e.published_at ?? null, now));
+    if (!sub?.channel_int) {
+      console.log("websub POST unknown topic", { topicHdr: topicHdr.slice(0, 120) });
+      return new Response("unknown topic", { status: 404 });
     }
 
-    if (stmts.length) await env.DB.batch(stmts);
+    const xml = new TextDecoder().decode(bodyU8);
+    const entries = extractEntries(xml);
 
-    console.log("websub POST saved", { channelInt, entries: entries.length, first: entries[0]?.videoId || null });
+    const upserted = await storeVideos({ env, channel_int: sub.channel_int, entries });
 
-    if (debug) return json({ ok: true, channelInt, entries: entries.length, first: entries[0]?.videoId || null });
-    return new Response(null, { status: 204 });
+    const hash = await sha1hex(bodyU8);
+
+    await env.DB.prepare(`
+      INSERT INTO logs (ts, kind, channel_int, channel_id, data)
+      VALUES (?, 'websub', ?, NULL, ?)
+    `).bind(nowSec(), sub.channel_int, JSON.stringify({
+      topic: topicHdr,
+      bytes: bodyU8.length,
+      hash,
+      entries: entries.length,
+      upserted
+    })).run();
+
+    return new Response("ok", { status: 200 });
   }
 
-  return new Response("method not allowed", { status: 405 });
+  return new Response("use GET/POST", { status: 200 });
 }
