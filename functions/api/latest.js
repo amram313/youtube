@@ -3,22 +3,19 @@ export async function onRequest({ env, request }) {
 
   const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") || "24", 10), 1), 60);
 
-  // cursor format: "<published_or_0>:<row_id>"
+  // cursor: נשתמש רק ב-id כדי לאפשר דפדוף באינדקס (INTEGER PRIMARY KEY / rowid)
+  // נתמוך גם בפורמט הישן "<published_or_0>:<row_id>" כדי לא לשבור דברים קיימים.
   const cursorRaw = (url.searchParams.get("cursor") || "").trim();
-  let cursorP = null;
-  let cursorId = 0;
+  let cursorId = null;
 
   if (cursorRaw) {
-    const [pStr, idStr] = cursorRaw.split(":");
-    const p = parseInt(pStr || "0", 10);
-    const id = parseInt(idStr || "0", 10);
-    if (!Number.isNaN(p) && !Number.isNaN(id)) {
-      cursorP = p;
-      cursorId = id;
-    }
+    const parts = cursorRaw.split(":");
+    const idStr = (parts.length === 2 ? parts[1] : parts[0]) || "0";
+    const id = parseInt(idStr, 10);
+    if (Number.isFinite(id) && id > 0) cursorId = id;
   }
 
-  const rows = await env.DB.prepare(`
+  const baseSql = `
     SELECT
       v.id,
       v.video_id,
@@ -28,14 +25,20 @@ export async function onRequest({ env, request }) {
       c.title AS channel_title
     FROM videos v
     JOIN channels c ON c.id = v.channel_int
-    WHERE (
-      ? IS NULL
-      OR COALESCE(v.published_at, 0) < ?
-      OR (COALESCE(v.published_at, 0) = ? AND v.id < ?)
-    )
-    ORDER BY COALESCE(v.published_at, 0) DESC, v.id DESC
-    LIMIT ?
-  `).bind(cursorP, cursorP, cursorP, cursorId, limit).all();
+  `;
+
+  const rows = cursorId
+    ? await env.DB.prepare(`
+        ${baseSql}
+        WHERE v.id < ?
+        ORDER BY v.id DESC
+        LIMIT ?
+      `).bind(cursorId, limit).all()
+    : await env.DB.prepare(`
+        ${baseSql}
+        ORDER BY v.id DESC
+        LIMIT ?
+      `).bind(limit).all();
 
   const videos = (rows.results || []).map(r => ({
     video_id: r.video_id,
@@ -48,8 +51,8 @@ export async function onRequest({ env, request }) {
   let next_cursor = null;
   const last = (rows.results || [])[rows.results.length - 1];
   if (last) {
-    const p = (last.published_at ?? 0);
-    next_cursor = `${p}:${last.id}`;
+    // cursor חדש הוא רק ה-id (הלקוח מתייחס לזה כמחרוזת אטומה)
+    next_cursor = String(last.id);
   }
 
   return Response.json(
