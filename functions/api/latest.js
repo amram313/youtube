@@ -1,10 +1,8 @@
 export async function onRequest({ env, request }) {
   const url = new URL(request.url);
 
-  const limit = Math.min(
-    Math.max(parseInt(url.searchParams.get("limit") || "24", 10), 1),
-    60
-  );
+  // ניסוי: תמיד נחזיר 200 בכל בקשה (גם אם הלקוח שולח limit=24)
+  const limit = 200;
 
   // cursor format: "<published_at>:<id>"
   const cursorRaw = (url.searchParams.get("cursor") || "").trim();
@@ -23,7 +21,7 @@ export async function onRequest({ env, request }) {
     }
   }
 
-  // רק videos, בלי channels בכלל (כדי לבדוק Reads נקי)
+  // רק videos, בלי channels בכלל (כדי למדוד Reads “נקי”)
   const rows =
     (cursorP !== null && cursorId !== null)
       ? await env.DB.prepare(`
@@ -47,7 +45,7 @@ export async function onRequest({ env, request }) {
     title: r.title,
     published_at: r.published_at,
 
-    // זמנית: בלי ערוצים (כדי לראות Reads “נקי”)
+    // ניסוי: בלי ערוצים
     channel_id: null,
     channel_title: null,
   }));
