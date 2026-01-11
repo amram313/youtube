@@ -322,7 +322,7 @@ async function pageSearch(q){
       sentinelEl: sentinel,
       onNearEnd: () => searchLoadMore(t, q),
       enabled: true,
-      rootMargin: "900px 0px",
+      rootMargin: "200px 0px",
     });
   }
 
