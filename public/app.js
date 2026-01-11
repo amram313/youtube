@@ -346,37 +346,45 @@ async function searchLoadMore(token, q){
     `/api/search?q=${encodeURIComponent(q)}&limit=24` +
     (searchState.cursor ? `&cursor=${encodeURIComponent(searchState.cursor)}` : "");
 
-  const data = await api(url);
+  let data;
+  try {
+    data = await api(url);
+  } catch (err) {
+    searchState.loading = false;
+    if (btn) btn.disabled = false;
+    if (hint) hint.textContent = `שגיאה בטעינה: ${err?.message || String(err)}`;
+    return;
+  }
 
   if (token !== searchState.token) {
     searchState.loading = false;
     return;
   }
 
-  // תמיכה בכמה שמות שדות (כי ה-API שלך כנראה לא מחזיר בדיוק next_cursor/results)
   const results = data.results || data.videos || data.items || [];
   if (results.length) {
     grid.insertAdjacentHTML("beforeend", results.map(r => renderVideoCard(r)).join(""));
   }
 
+  // cursor: קודם next_cursor, ואם לא קיים – מהפריט האחרון (cursor)
+  const last = results[results.length - 1];
   const next =
     data.next_cursor ||
     data.videos_next_cursor ||
     data.nextCursor ||
     data.cursor ||
+    last?.cursor ||
+    last?.rowid ||
     null;
 
   searchState.cursor = next ? String(next) : null;
   searchState.done = !searchState.cursor || results.length === 0;
 
-
   if (btn) {
     btn.disabled = false;
     btn.style.display = !searchState.done ? "inline-flex" : "none";
   }
-
   if (hint) hint.textContent = searchState.done ? "סוף הרשימה." : "";
-  if (btn) btn.style.display = !searchState.done ? "inline-flex" : "none";
 
   if (searchState.done) stopActiveObserver();
 
